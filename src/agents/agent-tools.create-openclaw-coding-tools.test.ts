@@ -664,7 +664,7 @@ describe("createOpenClawCodingTools", () => {
     expect(createOpenClawToolsMock).not.toHaveBeenCalled();
   });
 
-  it("forwards active model metadata to plugin-only tool construction", () => {
+  it("forwards prepared run facts to plugin-only tool construction", () => {
     const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
     createOpenClawToolsMock.mockClear();
     const resolvePluginToolsSpy = vi
@@ -678,6 +678,7 @@ describe("createOpenClawCodingTools", () => {
         runtimeToolAllowlist: ["memory_search"],
         modelProvider: "openrouter",
         modelId: "openrouter/auto",
+        nativeChannelId: "oc_native_chat",
         toolConstructionPlan: {
           includeBaseCodingTools: false,
           includeShellTools: false,
@@ -692,6 +693,7 @@ describe("createOpenClawCodingTools", () => {
       const pluginToolOptions = resolvePluginToolsSpy.mock.calls[0]?.[0].options;
       expect(pluginToolOptions?.modelProvider).toBe("openrouter");
       expect(pluginToolOptions?.modelId).toBe("openrouter/auto");
+      expect(pluginToolOptions?.nativeChannelId).toBe("oc_native_chat");
     } finally {
       resolvePluginToolsSpy.mockRestore();
     }
@@ -722,6 +724,20 @@ describe("createOpenClawCodingTools", () => {
     } finally {
       resolvePluginToolsSpy.mockRestore();
     }
+  });
+
+  it("forwards the native channel id through standard tool construction", () => {
+    const createOpenClawToolsMock = vi.mocked(createOpenClawTools);
+    createOpenClawToolsMock.mockClear();
+
+    createOpenClawCodingTools({
+      config: testConfig,
+      chatType: "group",
+      nativeChannelId: "oc_native_chat",
+    });
+
+    expect(latestCreateOpenClawToolsOptions().nativeChannelId).toBe("oc_native_chat");
+    expect(latestCreateOpenClawToolsOptions().currentChatType).toBe("group");
   });
 
   it("forwards auth profiles to plugin-only tool construction", () => {
