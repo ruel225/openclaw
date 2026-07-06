@@ -17,7 +17,6 @@ import {
   readGatewayDispatchConfigWithShellEnvFallback,
 } from "../config/gateway-dispatch-config.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
-import { createAbortError } from "../infra/abort-signal.js";
 import {
   callGateway,
   isGatewayCredentialsRequiredError,
@@ -28,8 +27,13 @@ import {
 } from "../gateway/call.js";
 import { isGatewaySecretRefUnavailableError } from "../gateway/credentials.js";
 import { ADMIN_SCOPE } from "../gateway/operator-scopes.js";
+import { createAbortError } from "../infra/abort-signal.js";
 import { parseStrictNonNegativeInteger } from "../infra/parse-finite-number.js";
 import { routeLogsToStderr } from "../logging/console.js";
+import {
+  startOneShotDiagnosticsExporters,
+  type OneShotDiagnosticsHandle,
+} from "../plugins/one-shot-diagnostics.js";
 import {
   classifySessionKeyShape,
   isUnscopedSessionKeySentinel,
@@ -143,6 +147,40 @@ function resolveGatewayAbortRetryDelaysMs(): readonly number[] {
 
 const loadEmbeddedAgentCommand = embeddedAgentCommandLoader.load;
 const loadAgentSessionModule = agentSessionModuleCache.load;
+
+type EmbeddedAgentCommandOpts = Parameters<Awaited<ReturnType<typeof loadEmbeddedAgentCommand>>>[0];
+
+async function startEmbeddedRunDiagnosticsExporters(
+  runtime: RuntimeEnv,
+): Promise<OneShotDiagnosticsHandle | null> {
+  try {
+    return await startOneShotDiagnosticsExporters({ config: await loadRuntimeConfig() });
+  } catch (err) {
+    // Exporter startup must never break the agent run itself.
+    runtime.error?.(`diagnostics exporter startup failed for embedded run: ${String(err)}`);
+    return null;
+  }
+}
+
+/**
+ * Run the embedded agent command with OTel diagnostics export for this
+ * one-shot process: the gateway only starts diagnostics exporters in its own
+ * process, so local/fallback embedded runs start one here and flush it before
+ * the CLI exits (including signal exits, which happen after this returns).
+ */
+async function runEmbeddedAgentCommand(
+  opts: EmbeddedAgentCommandOpts,
+  runtime: RuntimeEnv,
+  deps?: AgentCliDeps,
+) {
+  const agentCommand = await loadEmbeddedAgentCommand();
+  const diagnostics = await startEmbeddedRunDiagnosticsExporters(runtime);
+  try {
+    return await agentCommand(opts, runtime, deps);
+  } finally {
+    await diagnostics?.stop();
+  }
+}
 
 async function loadRuntimeConfig(): Promise<OpenClawConfig> {
   const { getRuntimeConfig } = await runtimeConfigModuleLoader.load();
@@ -926,8 +964,7 @@ export async function agentCliCommand(
   };
   try {
     if (dispatchOpts.local === true) {
-      const agentCommand = await loadEmbeddedAgentCommand();
-      const result = await agentCommand(localOpts, runtime, deps);
+      const result = await runEmbeddedAgentCommand(localOpts, runtime, deps);
       return returnAfterSignalExit(result, signalBridge.getReceivedSignal(), runtime);
     }
 
@@ -951,8 +988,7 @@ export async function agentCliCommand(
         runtime.error?.(
           `EMBEDDED FALLBACK: Gateway agent timed out; running embedded agent with fresh session ${fallbackSession.sessionId}: ${String(err)}`,
         );
-        const agentCommand = await loadEmbeddedAgentCommand();
-        const result = await agentCommand(
+        const result = await runEmbeddedAgentCommand(
           {
             ...localOpts,
             sessionId: fallbackSession.sessionId,
@@ -978,8 +1014,7 @@ export async function agentCliCommand(
       runtime.error?.(
         `EMBEDDED FALLBACK: Gateway agent failed; running embedded agent: ${String(err)}`,
       );
-      const agentCommand = await loadEmbeddedAgentCommand();
-      const result = await agentCommand(
+      const result = await runEmbeddedAgentCommand(
         {
           ...localOpts,
           resultMetaOverrides: EMBEDDED_FALLBACK_META,
