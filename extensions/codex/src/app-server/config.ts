@@ -1235,7 +1235,11 @@ function resolveCodexAppServerRemoteExecution(params: {
     .update("\0")
     .update(environmentId)
     .update("\0")
-    .update(chatgptAccountId ?? "")
+    .update(params.remoteWorkspaceRoot)
+    .update("\0")
+    // Without an explicit account id, the bearer token can select the registry
+    // tenant. Hash it into topology identity so account changes rotate threads.
+    .update(chatgptAccountId ?? authToken)
     .digest("hex");
   return {
     env: {

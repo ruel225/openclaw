@@ -299,9 +299,17 @@ describe("Codex app-server thread lifecycle bindings", () => {
       shouldRotateCodexAppServerBindingForRuntime({
         connectionClass: "local-loopback",
         current: "remote-execution-v1",
-        requireCurrentFingerprint: true,
+        currentRemoteExecution: "sha256:remote-environment",
       }),
     ).toBe(true);
+    expect(
+      shouldRotateCodexAppServerBindingForRuntime({
+        connectionClass: "local-loopback",
+        current: "remote-execution-v1",
+        currentRemoteExecution: "sha256:remote-environment",
+        bindingRemoteExecution: "sha256:remote-environment",
+      }),
+    ).toBe(false);
   });
 
   it("rotates a legacy local binding before starting remote execution", async () => {
@@ -346,9 +354,11 @@ describe("Codex app-server thread lifecycle bindings", () => {
     expect(request.mock.calls.map(([method]) => method)).toEqual(["thread/start"]);
     expect(binding.threadId).toBe("thread-remote");
     expect(binding.appServerRuntimeFingerprint).toBe("remote-runtime-v1");
+    expect(binding.remoteExecutionFingerprint).toBe("sha256:remote-environment");
     const saved = await readCodexAppServerBinding(sessionFile);
     expect(saved?.threadId).toBe("thread-remote");
     expect(saved?.appServerRuntimeFingerprint).toBe("remote-runtime-v1");
+    expect(saved?.remoteExecutionFingerprint).toBe("sha256:remote-environment");
   });
 
   it("does not write a binding when thread start resolves after abort", async () => {

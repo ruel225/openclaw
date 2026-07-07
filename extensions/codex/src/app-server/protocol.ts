@@ -130,6 +130,7 @@ export type CodexThreadStartParams = JsonObject & {
 
 export type CodexThreadResumeParams = JsonObject & {
   threadId: string;
+  cwd?: string;
   model?: string;
   modelProvider?: string | null;
   personality?: string | null;

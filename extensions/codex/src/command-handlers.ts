@@ -12,7 +12,12 @@ import {
   readCodexComputerUseStatus,
   type CodexComputerUseSetupParams,
 } from "./app-server/computer-use.js";
-import { isCodexFastServiceTier, type CodexComputerUseConfig } from "./app-server/config.js";
+import {
+  isCodexFastServiceTier,
+  readCodexPluginConfig,
+  resolveCodexAppServerRuntimeOptions,
+  type CodexComputerUseConfig,
+} from "./app-server/config.js";
 import { listAllCodexAppServerModels } from "./app-server/models.js";
 import { assertCodexThreadResumeResponse } from "./app-server/protocol-validators.js";
 import { isJsonObject, type JsonValue } from "./app-server/protocol.js";
@@ -888,12 +893,20 @@ async function resumeThread(
       agentDir: scope.agentDir,
       config: ctx.config,
     });
+    const hasRemoteExecution = Boolean(
+      readCodexPluginConfig(pluginConfig).appServer?.experimental?.remoteExecution,
+    );
+    const appServer = hasRemoteExecution
+      ? resolveCodexAppServerRuntimeOptions({ pluginConfig })
+      : undefined;
+    const remoteCwd = appServer?.remoteWorkspaceRoot;
     const response = assertCodexThreadResumeResponse(
       await deps.codexControlRequest(
         pluginConfig,
         CODEX_CONTROL_METHODS.resumeThread,
         {
           threadId: normalizedThreadId,
+          ...(remoteCwd ? { cwd: remoteCwd } : {}),
           excludeTurns: true,
           persistExtendedHistory: true,
         },
@@ -930,6 +943,7 @@ async function resumeThread(
         authProfileId,
         model: response.model,
         modelProvider,
+        remoteExecutionFingerprint: appServer?.remoteExecutionFingerprint,
         historyCoveredThrough: new Date().toISOString(),
       },
     });

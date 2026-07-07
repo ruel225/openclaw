@@ -446,7 +446,8 @@ through this validated plugin surface.
 Codex auth, app inventory, thread state, hooks, and control-plane lifecycle
 remain with the Gateway-owned app-server. Normal Codex threads use the
 configured remote environment by default. Enabling this mode, or changing its
-registry, environment, or account identity, starts a fresh native Codex thread
+registry, environment, credentials without an explicit account identity,
+account identity, or remote workspace root, starts a fresh native Codex thread
 instead of resuming a binding from another execution topology.
 
 Current preview limits:

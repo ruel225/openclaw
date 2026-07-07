@@ -697,6 +697,7 @@ describe("runCodexAppServerSideQuestion", () => {
       approvalPolicy: "on-request",
       sandbox: "workspace-write",
       appServerRuntimeFingerprint: REMOTE_EXECUTION_RUNTIME_FINGERPRINT,
+      remoteExecutionFingerprint: REMOTE_EXECUTION_RUNTIME.remoteExecutionFingerprint,
       createdAt: new Date(0).toISOString(),
       updatedAt: new Date(0).toISOString(),
     });

@@ -393,6 +393,110 @@ describe("codex conversation binding", () => {
     expect(binding?.threadId).toBe("thread-remote");
     expect(binding?.cwd).toBe("/remote/workspaces");
     expect(binding?.appServerRuntimeFingerprint).toEqual(expect.any(String));
+    expect(binding?.remoteExecutionFingerprint).toBe(
+      resolveCodexAppServerRuntimeOptions({
+        pluginConfig: REMOTE_EXECUTION_PLUGIN_CONFIG,
+        requirementsToml: null,
+      }).remoteExecutionFingerprint,
+    );
+    expect(binding?.remoteExecutionFingerprint).toEqual(expect.any(String));
+  });
+
+  it("transfers a fingerprinted local source thread into a conversation binding", async () => {
+    const sourceIdentity = {
+      kind: "session" as const,
+      agentId: "main",
+      sessionId: "source-session",
+    };
+    await testCodexAppServerBindingStore.mutate(sourceIdentity, {
+      kind: "set",
+      binding: {
+        threadId: "thread-source",
+        cwd: tempDir,
+        appServerRuntimeFingerprint: "local-runtime-v1",
+      },
+    });
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
+        requests.push({ method, params: requestParams });
+        if (method === "thread/resume") {
+          return conversationThreadStartResult("thread-source");
+        }
+        if (method === "turn/start") {
+          setImmediate(() =>
+            notificationHandler?.({
+              method: "turn/completed",
+              params: {
+                threadId: "thread-source",
+                turn: {
+                  id: "turn-1",
+                  status: "completed",
+                  items: [{ type: "agentMessage", id: "item-1", text: "done" }],
+                },
+              },
+            }),
+          );
+          return { turn: { id: "turn-1" } };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      }),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+
+    const result = await handleCodexConversationInboundClaim(
+      {
+        content: "hello",
+        channel: "telegram",
+        isGroup: false,
+        commandAuthorized: true,
+      },
+      {
+        channelId: "telegram",
+        pluginBinding: {
+          bindingId: "binding-1",
+          pluginId: "codex",
+          pluginRoot: tempDir,
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "5185575566",
+          boundAt: Date.now(),
+          data: {
+            kind: "codex-app-server-session",
+            version: 2,
+            bindingId: "binding-data-1",
+            workspaceDir: tempDir,
+            agentId: "main",
+            source: {
+              agentId: "main",
+              sessionId: "source-session",
+              threadId: "thread-source",
+            },
+          },
+        },
+      },
+      { timeoutMs: 50 },
+    );
+
+    expect(result).toEqual({ handled: true, reply: { text: "done" } });
+    expect(requests.map(({ method }) => method)).toEqual(["thread/resume", "turn/start"]);
+    expect(requests[0]?.params.threadId).toBe("thread-source");
+    await expect(testCodexAppServerBindingStore.read(sourceIdentity)).resolves.toBeUndefined();
+    await expect(
+      testCodexAppServerBindingStore.read({
+        kind: "conversation",
+        bindingId: "binding-data-1",
+      }),
+    ).resolves.toMatchObject({
+      threadId: "thread-source",
+      cwd: tempDir,
+      conversationSourceTransferComplete: true,
+    });
   });
 
   it("starts a new bind thread when no model override is provided", async () => {
@@ -2105,6 +2209,12 @@ describe("codex conversation binding", () => {
       "turn/start",
     ]);
     expect(requests[3]?.params.cwd).toBe("/remote/workspaces");
+    await expect(readTestConversationBinding(sessionFile)).resolves.toMatchObject({
+      threadId: "thread-recovered",
+      cwd: "/remote/workspaces",
+      appServerRuntimeFingerprint: binding?.appServerRuntimeFingerprint,
+      remoteExecutionFingerprint: binding?.remoteExecutionFingerprint,
+    });
   });
 
   it("keeps network-proxy bound app-server turns on their thread permissions profile", async () => {

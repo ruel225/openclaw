@@ -319,7 +319,11 @@ export async function runCodexAppServerSideQuestion(
   let nativeHookRelay: NativeHookRelayRegistrationHandle | undefined;
 
   try {
-    if (appServer.remoteExecutionFingerprint || binding.appServerRuntimeFingerprint) {
+    if (
+      appServer.remoteExecutionFingerprint ||
+      binding.remoteExecutionFingerprint ||
+      binding.appServerRuntimeFingerprint
+    ) {
       const currentRuntimeFingerprint = buildCodexAppServerRuntimeFingerprint({
         appServer,
         appServerVersion: client.getServerVersion(),
@@ -330,8 +334,8 @@ export async function runCodexAppServerSideQuestion(
           connectionClass: appServer.connectionClass,
           current: currentRuntimeFingerprint,
           binding: binding.appServerRuntimeFingerprint,
-          // /btw must not fork a legacy local thread into a remote execution environment.
-          requireCurrentFingerprint: Boolean(appServer.remoteExecutionFingerprint),
+          currentRemoteExecution: appServer.remoteExecutionFingerprint,
+          bindingRemoteExecution: binding.remoteExecutionFingerprint,
         })
       ) {
         throw new Error(

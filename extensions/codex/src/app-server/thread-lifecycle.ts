@@ -424,9 +424,8 @@ export async function startOrResumeThread(params: {
         connectionClass: params.appServer.connectionClass,
         current: params.appServerRuntimeFingerprint,
         binding: binding.appServerRuntimeFingerprint,
-        // Remote execution changes a historically local runtime, so legacy
-        // bindings without a fingerprint must not resume against the new default environment.
-        requireCurrentFingerprint: Boolean(params.appServer.remoteExecutionFingerprint),
+        currentRemoteExecution: params.appServer.remoteExecutionFingerprint,
+        bindingRemoteExecution: binding.remoteExecutionFingerprint,
       })
     ) {
       embeddedAgentLog.debug("codex app-server runtime identity changed; starting a new thread", {
@@ -767,6 +766,7 @@ export async function startOrResumeThread(params: {
             nativeHookRelayGeneration:
               finalConfigPatch.nativeHookRelayGeneration ?? resumeBinding.nativeHookRelayGeneration,
             appServerRuntimeFingerprint: params.appServerRuntimeFingerprint,
+            remoteExecutionFingerprint: params.appServer.remoteExecutionFingerprint,
             pluginAppsFingerprint: resumeBinding.pluginAppsFingerprint,
             pluginAppsInputFingerprint: resumeBinding.pluginAppsInputFingerprint,
             pluginAppPolicyContext: resumeBinding.pluginAppPolicyContext,
@@ -909,6 +909,7 @@ export async function startOrResumeThread(params: {
             networkProxyConfigFingerprint,
             nativeHookRelayGeneration: finalConfigPatch.nativeHookRelayGeneration,
             appServerRuntimeFingerprint: params.appServerRuntimeFingerprint,
+            remoteExecutionFingerprint: params.appServer.remoteExecutionFingerprint,
             pluginAppsFingerprint: pluginThreadConfig?.fingerprint,
             pluginAppsInputFingerprint: pluginThreadConfig?.inputFingerprint,
             pluginAppPolicyContext: pluginThreadConfig?.policyContext,
@@ -955,6 +956,7 @@ export async function startOrResumeThread(params: {
       networkProxyConfigFingerprint,
       nativeHookRelayGeneration: finalConfigPatch.nativeHookRelayGeneration,
       appServerRuntimeFingerprint: params.appServerRuntimeFingerprint,
+      remoteExecutionFingerprint: params.appServer.remoteExecutionFingerprint,
       pluginAppsFingerprint: pluginThreadConfig?.fingerprint,
       pluginAppsInputFingerprint: pluginThreadConfig?.inputFingerprint,
       pluginAppPolicyContext: pluginThreadConfig?.policyContext,
@@ -972,19 +974,19 @@ export function shouldRotateCodexAppServerBindingForRuntime(params: {
   connectionClass: CodexAppServerRuntimeOptions["connectionClass"];
   current?: string;
   binding?: string;
-  requireCurrentFingerprint?: boolean;
+  currentRemoteExecution?: string;
+  bindingRemoteExecution?: string;
 }): boolean {
+  if (params.bindingRemoteExecution !== params.currentRemoteExecution) {
+    return true;
+  }
   if (!params.current) {
     return false;
   }
   if (params.binding === params.current) {
     return false;
   }
-  return (
-    params.requireCurrentFingerprint === true ||
-    params.connectionClass === "remote" ||
-    Boolean(params.binding)
-  );
+  return params.connectionClass === "remote" || Boolean(params.binding);
 }
 
 function isTransientWebSearchRestriction(

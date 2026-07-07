@@ -576,6 +576,7 @@ async function writeThreadBindingFromResponse(
       networkProxyProfileName: resolved.runtime.networkProxy?.profileName,
       networkProxyConfigFingerprint: resolved.runtime.networkProxy?.configFingerprint,
       appServerRuntimeFingerprint: resolved.appServerRuntimeFingerprint,
+      remoteExecutionFingerprint: resolved.runtime.remoteExecutionFingerprint,
     },
   });
   if (!committed) {
@@ -714,9 +715,13 @@ async function runBoundTurn(params: {
     modelScopedRuntime,
     client,
   );
-  const runtimeBindingChanged = modelScopedRuntime.remoteExecutionFingerprint
-    ? binding.appServerRuntimeFingerprint !== appServerRuntimeFingerprint
-    : Boolean(binding.appServerRuntimeFingerprint);
+  const remoteExecutionBindingChanged =
+    binding.remoteExecutionFingerprint !== modelScopedRuntime.remoteExecutionFingerprint;
+  const runtimeBindingChanged =
+    remoteExecutionBindingChanged ||
+    (modelScopedRuntime.remoteExecutionFingerprint
+      ? binding.appServerRuntimeFingerprint !== appServerRuntimeFingerprint
+      : Boolean(binding.appServerRuntimeFingerprint));
   let executionCwd = runtimeBindingChanged
     ? resolveConversationExecutionCwd(localWorkspaceDir, modelScopedRuntime)
     : binding.cwd || resolveConversationExecutionCwd(localWorkspaceDir, modelScopedRuntime);
@@ -768,6 +773,7 @@ async function runBoundTurn(params: {
           networkProxyProfileName: modelScopedRuntime.networkProxy?.profileName,
           networkProxyConfigFingerprint: modelScopedRuntime.networkProxy?.configFingerprint,
           appServerRuntimeFingerprint,
+          remoteExecutionFingerprint: modelScopedRuntime.remoteExecutionFingerprint,
           conversationStartId: binding.conversationStartId,
           conversationSourceTransferComplete: binding.conversationSourceTransferComplete,
           historyCoveredThrough: binding.historyCoveredThrough,
@@ -936,9 +942,11 @@ async function prepareConversationBinding(
       sessionKey: params.sessionKey,
     });
     const agentLookup = buildAgentLookup({ agentDir: params.data.agentDir, config: params.config });
+    // This marker ships with remote execution. The generic runtime fingerprint
+    // also exists on local sessions, so it cannot classify transferred cwd state.
     // Remote bindings store an executor cwd. Recovery must start from the local
     // workspace so thread creation can project it into the current environment.
-    const inheritedWorkspaceDir = inherited?.appServerRuntimeFingerprint
+    const inheritedWorkspaceDir = inherited?.remoteExecutionFingerprint
       ? params.data.workspaceDir
       : (inherited?.cwd ?? params.data.workspaceDir);
     const bindingParams: CodexThreadBindingParams = {
@@ -958,9 +966,9 @@ async function prepareConversationBinding(
       agentId: params.data.agentId,
     };
     const threadId = requested?.threadId ?? (!current ? params.data.source?.threadId : undefined);
-    // A persisted remote cwd/thread cannot be proven valid after a topology change.
+    // A transferred remote cwd/thread cannot be proven valid in the target conversation.
     // Start clean; active remote execution already follows the same safe behavior.
-    if (threadId && !options.forceNew && !inherited?.appServerRuntimeFingerprint) {
+    if (threadId && !options.forceNew && !inherited?.remoteExecutionFingerprint) {
       await attachExistingThread({ ...bindingParams, threadId });
     } else {
       await createThread(bindingParams);

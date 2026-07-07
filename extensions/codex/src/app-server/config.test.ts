@@ -494,15 +494,37 @@ describe("Codex app-server config", () => {
       });
     const first = resolve("registry-token-first");
     const second = resolve("registry-token-second");
+    const stableAccountFirst = resolve("registry-token-first", "account-stable");
+    const stableAccountSecond = resolve("registry-token-second", "account-stable");
     const otherAccount = resolve("registry-token-second", "account-other");
+    const otherWorkspace = resolveRuntimeForTest({
+      pluginConfig: {
+        appServer: {
+          remoteWorkspaceRoot: "/home/codex/other-workspace",
+          experimental: {
+            remoteExecution: {
+              registryUrl: "https://environment-registry.example.com/api",
+              environmentId: "devbox-example",
+              authToken: "registry-token-second",
+            },
+          },
+        },
+      },
+    });
     const firstKey = codexAppServerStartOptionsKey(first.start);
     const secondKey = codexAppServerStartOptionsKey(second.start);
 
     expect(firstKey).not.toEqual(secondKey);
     expect(firstKey).not.toContain("registry-token-first");
     expect(secondKey).not.toContain("registry-token-second");
-    expect(first.remoteExecutionFingerprint).toEqual(second.remoteExecutionFingerprint);
+    expect(first.remoteExecutionFingerprint).not.toEqual(second.remoteExecutionFingerprint);
+    expect(stableAccountFirst.remoteExecutionFingerprint).toEqual(
+      stableAccountSecond.remoteExecutionFingerprint,
+    );
     expect(otherAccount.remoteExecutionFingerprint).not.toEqual(second.remoteExecutionFingerprint);
+    expect(otherWorkspace.remoteExecutionFingerprint).not.toEqual(
+      second.remoteExecutionFingerprint,
+    );
   });
 
   it("fails closed for incomplete or unsafe remote execution topology", () => {
