@@ -499,6 +499,92 @@ describe("codex conversation binding", () => {
     });
   });
 
+  it("honors an explicit local rebind after remote execution is disabled", async () => {
+    const identity = { kind: "conversation" as const, bindingId: "binding-data-1" };
+    await testCodexAppServerBindingStore.mutate(identity, {
+      kind: "set",
+      binding: {
+        threadId: "thread-remote-old",
+        cwd: "/remote/workspaces",
+        appServerRuntimeFingerprint: "remote-runtime-v1",
+        remoteExecutionFingerprint: "sha256:remote-environment",
+        conversationStartId: "start-old",
+      },
+    });
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
+        requests.push({ method, params: requestParams });
+        if (method === "thread/resume") {
+          return conversationThreadStartResult("thread-local-requested");
+        }
+        if (method === "turn/start") {
+          setImmediate(() =>
+            notificationHandler?.({
+              method: "turn/completed",
+              params: {
+                threadId: "thread-local-requested",
+                turn: {
+                  id: "turn-1",
+                  status: "completed",
+                  items: [{ type: "agentMessage", id: "item-1", text: "done" }],
+                },
+              },
+            }),
+          );
+          return { turn: { id: "turn-1" } };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      }),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+
+    const result = await handleCodexConversationInboundClaim(
+      {
+        content: "continue locally",
+        channel: "telegram",
+        isGroup: false,
+        commandAuthorized: true,
+      },
+      {
+        channelId: "telegram",
+        pluginBinding: {
+          bindingId: "binding-1",
+          pluginId: "codex",
+          pluginRoot: tempDir,
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "5185575566",
+          boundAt: Date.now(),
+          data: {
+            kind: "codex-app-server-session",
+            version: 2,
+            bindingId: "binding-data-1",
+            workspaceDir: tempDir,
+            start: { id: "start-new", threadId: "thread-local-requested" },
+          },
+        },
+      },
+      { timeoutMs: 50 },
+    );
+
+    expect(result).toEqual({ handled: true, reply: { text: "done" } });
+    expect(requests.map(({ method }) => method)).toEqual(["thread/resume", "turn/start"]);
+    expect(requests[0]?.params.threadId).toBe("thread-local-requested");
+    const binding = await testCodexAppServerBindingStore.read(identity);
+    expect(binding).toMatchObject({
+      threadId: "thread-local-requested",
+      cwd: tempDir,
+      conversationStartId: "start-new",
+    });
+    expect(binding).not.toHaveProperty("remoteExecutionFingerprint");
+  });
+
   it("starts a new bind thread when no model override is provided", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const requests: Array<{ method: string; params: Record<string, unknown> }> = [];

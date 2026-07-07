@@ -967,8 +967,9 @@ async function prepareConversationBinding(
     };
     const threadId = requested?.threadId ?? (!current ? params.data.source?.threadId : undefined);
     // A transferred remote cwd/thread cannot be proven valid in the target conversation.
-    // Start clean; active remote execution already follows the same safe behavior.
-    if (threadId && !options.forceNew && !inherited?.remoteExecutionFingerprint) {
+    // Explicit requests are evaluated against the current runtime by attachExistingThread.
+    const canAttachThread = Boolean(requested?.threadId) || !inherited?.remoteExecutionFingerprint;
+    if (threadId && !options.forceNew && canAttachThread) {
       await attachExistingThread({ ...bindingParams, threadId });
     } else {
       await createThread(bindingParams);
