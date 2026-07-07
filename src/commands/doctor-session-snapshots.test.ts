@@ -233,6 +233,44 @@ describe("doctor session snapshot stale runtime metadata", () => {
     ]);
   });
 
+  it("repairs stale imsg bundled paths to the generated plugin skill path", async () => {
+    const stalePath = path.join(
+      root,
+      "old-runtime",
+      "node_modules",
+      "openclaw",
+      "skills",
+      "imsg",
+      "SKILL.md",
+    );
+    const stateDir = path.join(root, "state");
+    const pluginSkillPath = path.join(stateDir, "plugin-skills", "imsg", "SKILL.md");
+    await fs.mkdir(path.dirname(pluginSkillPath), { recursive: true });
+    await fs.writeFile(pluginSkillPath, "# imsg\n");
+
+    const findings = scanSessionStoreForStaleRuntimeSnapshotPaths({
+      bundledSkillsDir,
+      env: { OPENCLAW_STATE_DIR: stateDir },
+      store: {
+        "agent:imsg": sessionEntry({
+          skillsSnapshot: {
+            prompt: skillPrompt(stalePath),
+            skills: [{ name: "imsg" }],
+          },
+        }),
+      },
+    });
+
+    expect(findings).toEqual([
+      {
+        sessionKey: "agent:imsg",
+        field: "skillsSnapshot.prompt",
+        cachedPath: stalePath,
+        expectedPath: pluginSkillPath,
+      },
+    ]);
+  });
+
   it("ignores current bundled locations and unrelated workspace skill locations", () => {
     const currentPath = path.join(bundledSkillsDir, "doctor", "SKILL.md");
     const workspacePath = path.join(root, "workspace", "skills", "doctor", "SKILL.md");

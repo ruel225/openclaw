@@ -16,7 +16,7 @@ import type { HealthFinding, HealthRepairEffect } from "../flows/health-checks.j
 import { expandHomePrefix } from "../infra/home-dir.js";
 import { writeTextAtomic } from "../infra/json-files.js";
 import { resolveBundledSkillsDir } from "../skills/loading/bundled-dir.js";
-import { shortenHomePath } from "../utils.js";
+import { resolveConfigDir, shortenHomePath } from "../utils.js";
 
 const SESSION_SNAPSHOTS_CHECK_ID = "core/doctor/session-snapshots";
 
@@ -206,6 +206,25 @@ function resolveExpectedBundledSkillPath(params: {
     return undefined;
   }
   const expectedPath = joinPathForRoot(params.bundledSkillsDir, ...relativeSegments);
+  if (params.pathExists(expectedPath)) {
+    return expectedPath;
+  }
+  return resolveMovedBundledSkillPath({
+    relativeSegments,
+    pathExists: params.pathExists,
+    env: params.env,
+  });
+}
+
+function resolveMovedBundledSkillPath(params: {
+  relativeSegments: readonly string[];
+  pathExists: (filePath: string) => boolean;
+  env?: NodeJS.ProcessEnv;
+}): string | undefined {
+  if (params.relativeSegments.join("/") !== "imsg/SKILL.md") {
+    return undefined;
+  }
+  const expectedPath = path.join(resolveConfigDir(params.env), "plugin-skills", "imsg", "SKILL.md");
   return params.pathExists(expectedPath) ? expectedPath : undefined;
 }
 
