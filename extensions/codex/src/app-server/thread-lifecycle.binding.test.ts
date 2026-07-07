@@ -304,6 +304,53 @@ describe("Codex app-server thread lifecycle bindings", () => {
     ).toBe(true);
   });
 
+  it("rotates a legacy local binding before starting remote execution", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    await writeCodexAppServerBinding(sessionFile, {
+      threadId: "thread-local",
+      cwd: workspaceDir,
+      model: "openai/gpt-oss-20b",
+      modelProvider: "lmstudio",
+      dynamicToolsFingerprint: "[]",
+      approvalPolicy: "on-request",
+      sandbox: "workspace-write",
+    });
+    const params = createParams(sessionFile, workspaceDir);
+    params.provider = "codex";
+    params.modelId = "openai/gpt-oss-20b";
+    const appServer = {
+      ...createThreadLifecycleAppServerOptions(),
+      remoteExecutionFingerprint: "sha256:remote-environment",
+    };
+    const request = vi.fn(async (method: string) => {
+      if (method === "thread/start") {
+        const response = threadStartResult("thread-remote");
+        response.model = "openai/gpt-oss-20b";
+        response.modelProvider = "lmstudio";
+        response.thread.modelProvider = "lmstudio";
+        return response;
+      }
+      throw new Error(`unexpected method: ${method}`);
+    });
+
+    const binding = await startOrResumeThread({
+      client: { request } as never,
+      params,
+      cwd: workspaceDir,
+      dynamicTools: [],
+      appServer,
+      appServerRuntimeFingerprint: "remote-runtime-v1",
+    });
+
+    expect(request.mock.calls.map(([method]) => method)).toEqual(["thread/start"]);
+    expect(binding.threadId).toBe("thread-remote");
+    expect(binding.appServerRuntimeFingerprint).toBe("remote-runtime-v1");
+    const saved = await readCodexAppServerBinding(sessionFile);
+    expect(saved?.threadId).toBe("thread-remote");
+    expect(saved?.appServerRuntimeFingerprint).toBe("remote-runtime-v1");
+  });
+
   it("does not write a binding when thread start resolves after abort", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const workspaceDir = path.join(tempDir, "workspace");
