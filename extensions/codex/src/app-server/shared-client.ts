@@ -11,14 +11,20 @@ import {
   resolveCodexAppServerAuthProfileStore,
   resolveCodexAppServerFallbackApiKeyCacheKey,
 } from "./auth-bridge.js";
-import { CodexAppServerClient, isUnsupportedCodexAppServerVersionError } from "./client.js";
+import {
+  CodexAppServerClient,
+  compareCodexAppServerVersions,
+  isUnsupportedCodexAppServerVersionError,
+} from "./client.js";
 import {
   codexAppServerStartOptionsKey,
+  hasCodexRemoteExecutionStartOptions,
   resolveCodexAppServerRuntimeOptions,
   type CodexAppServerStartOptions,
 } from "./config.js";
 import { resolveManagedCodexAppServerStartOptions } from "./managed-binary.js";
 import { withTimeout } from "./timeout.js";
+import { MIN_CODEX_REMOTE_EXECUTION_APP_SERVER_VERSION } from "./version.js";
 
 type SharedCodexAppServerClientEntry = {
   client?: CodexAppServerClient;
@@ -316,6 +322,7 @@ async function startInitializedCodexAppServerClient(params: {
     const initialize = client.initialize();
     try {
       await withTimeout(initialize, params.timeoutMs ?? 0, "codex app-server initialize timed out");
+      assertCodexRemoteExecutionSupported(client, startOptions);
     } catch (error) {
       client.close();
       void initialize.catch(() => undefined);
@@ -359,6 +366,37 @@ async function startInitializedCodexAppServerClient(params: {
   throw new Error("Managed Codex app-server fallback candidates were exhausted.");
 }
 
+function assertCodexRemoteExecutionSupported(
+  client: CodexAppServerClient,
+  startOptions: CodexAppServerStartOptions,
+): void {
+  if (!hasCodexRemoteExecutionStartOptions(startOptions)) {
+    return;
+  }
+  const detectedVersion = client.getServerVersion();
+  if (
+    detectedVersion &&
+    compareCodexAppServerVersions(detectedVersion, MIN_CODEX_REMOTE_EXECUTION_APP_SERVER_VERSION) >=
+      0
+  ) {
+    return;
+  }
+  throw new Error(
+    `Codex app-server ${MIN_CODEX_REMOTE_EXECUTION_APP_SERVER_VERSION} or newer is required for remote execution environments, but detected ${
+      detectedVersion ?? "an unknown version"
+    }. Use OpenClaw's managed Codex app-server binary or configure a newer custom binary.`,
+  );
+}
+
+function isUnsupportedCodexRemoteExecutionVersionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.startsWith(
+      `Codex app-server ${MIN_CODEX_REMOTE_EXECUTION_APP_SERVER_VERSION} or newer is required for remote execution environments`,
+    )
+  );
+}
+
 function resolveManagedFallbackStartOptions(
   startOptions: CodexAppServerStartOptions,
 ): CodexAppServerStartOptions[] {
@@ -390,7 +428,8 @@ function shouldTryManagedFallbackStartOption(
   return (
     startOptions.commandSource === "resolved-managed" &&
     index < startOptionsCandidates.length - 1 &&
-    isUnsupportedCodexAppServerVersionError(error)
+    (isUnsupportedCodexAppServerVersionError(error) ||
+      isUnsupportedCodexRemoteExecutionVersionError(error))
   );
 }
 

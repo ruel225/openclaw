@@ -136,13 +136,13 @@ function startThreadWithHarness(
   return { harness, run };
 }
 
-async function answerInitialize(harness: ClientHarness): Promise<void> {
+async function answerInitialize(harness: ClientHarness, version = "0.125.0"): Promise<void> {
   await vi.waitFor(() => expect(harness.writes.length).toBeGreaterThanOrEqual(1), {
     interval: 1,
     timeout: HARNESS_REQUEST_TIMEOUT_MS,
   });
   const initialize = JSON.parse(harness.writes[0] ?? "{}") as { id?: number };
-  harness.send({ id: initialize.id, result: { userAgent: "openclaw/0.125.0 (macOS; test)" } });
+  harness.send({ id: initialize.id, result: { userAgent: `openclaw/${version} (macOS; test)` } });
 }
 
 async function waitForRequest(
@@ -197,6 +197,54 @@ describe("startCodexAttemptThread", () => {
 
     await expect(run).rejects.toThrow("Invalid bearer token");
     expect(harness.process.stdin.destroyed).toBe(true);
+  });
+
+  it("fails before thread start when remote execution uses an old custom app-server", async () => {
+    const { harness, run } = startThreadWithHarness(5_000, new AbortController().signal, {
+      pluginConfig: {
+        appServer: {
+          command: "codex",
+          remoteWorkspaceRoot: "/remote/workspace",
+          experimental: {
+            remoteExecution: {
+              registryUrl: "https://environment-registry.example.com/api",
+              environmentId: "devbox-example",
+              authToken: "registry-token",
+            },
+          },
+        },
+      },
+    });
+    await answerInitialize(harness, "0.141.0");
+
+    await expect(run).rejects.toThrow(
+      "Codex app-server 0.142.0 or newer is required for remote execution environments",
+    );
+    expect(readHarnessMessages(harness.writes)).not.toContainEqual(
+      expect.objectContaining({ method: "thread/start" }),
+    );
+  });
+
+  it("rejects local Computer Use setup with remote execution", async () => {
+    const { harness, run } = startThreadWithHarness(5_000, new AbortController().signal, {
+      pluginConfig: {
+        computerUse: { enabled: true },
+        appServer: {
+          command: "codex",
+          remoteWorkspaceRoot: "/remote/workspace",
+          experimental: {
+            remoteExecution: {
+              registryUrl: "https://environment-registry.example.com/api",
+              environmentId: "devbox-example",
+              authToken: "registry-token",
+            },
+          },
+        },
+      },
+    });
+
+    await expect(run).rejects.toThrow("Codex Computer Use cannot run with");
+    expect(harness.writes).toEqual([]);
   });
 
   it("retires a failed startup client after another active lease releases", async () => {

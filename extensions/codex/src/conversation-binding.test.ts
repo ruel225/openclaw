@@ -155,12 +155,24 @@ const NETWORK_PROXY_PROFILE_NAME = NETWORK_PROXY_RUNTIME.networkProxy?.profileNa
 const NETWORK_PROXY_CONFIG_PATCH = NETWORK_PROXY_RUNTIME.networkProxy?.configPatch ?? {};
 const NETWORK_PROXY_CONFIG_FINGERPRINT =
   NETWORK_PROXY_RUNTIME.networkProxy?.configFingerprint ?? "missing";
+const REMOTE_EXECUTION_PLUGIN_CONFIG = {
+  appServer: {
+    remoteWorkspaceRoot: "/remote/workspaces",
+    experimental: {
+      remoteExecution: {
+        registryUrl: "https://environment-registry.example.com/api",
+        environmentId: "devbox-example",
+        authToken: "registry-token",
+      },
+    },
+  },
+};
 
-function conversationThreadStartResult(threadId: string) {
+function conversationThreadStartResult(threadId: string, cwd = tempDir) {
   return {
     approvalPolicy: "never",
     approvalsReviewer: "user",
-    cwd: tempDir,
+    cwd,
     model: "gpt-5.4-mini",
     modelProvider: "openai",
     sandbox: { type: "workspaceWrite", networkAccess: false },
@@ -176,7 +188,7 @@ function conversationThreadStartResult(threadId: string) {
       updatedAt: 1,
       status: { type: "idle" },
       path: null,
-      cwd: tempDir,
+      cwd,
       cliVersion: "0.125.0",
       source: "unknown",
       agentNickname: null,
@@ -235,6 +247,7 @@ describe("codex conversation binding", () => {
       defaultAgentId: "main",
       sessionAgentId: "main",
     });
+    codexRequirementsTomlMock.mockReturnValue("");
   });
 
   it("uses the default Codex auth profile and omits the public OpenAI provider for new binds", async () => {
@@ -350,6 +363,36 @@ describe("codex conversation binding", () => {
     expect(bindingAfterStart?.threadId).toBe("thread-new");
     expect(bindingAfterStart?.networkProxyProfileName).toBe(NETWORK_PROXY_PROFILE_NAME);
     expect(bindingAfterStart?.networkProxyConfigFingerprint).toBe(NETWORK_PROXY_CONFIG_FINGERPRINT);
+  });
+
+  it("starts remote conversation bindings with the projected executor cwd", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
+        requests.push({ method, params: requestParams });
+        if (method === "thread/resume") {
+          throw new Error("remote binding must not resume an unverified thread");
+        }
+        return conversationThreadStartResult("thread-remote", "/remote/workspaces");
+      }),
+      getServerVersion: vi.fn(() => "0.142.5"),
+      getRuntimeIdentity: vi.fn(() => undefined),
+    });
+
+    await startCodexConversationThread({
+      pluginConfig: REMOTE_EXECUTION_PLUGIN_CONFIG,
+      sessionFile,
+      threadId: "thread-local",
+      workspaceDir: tempDir,
+    });
+
+    expect(requests.map((request) => request.method)).toEqual(["thread/start"]);
+    expect(requests[0]?.params.cwd).toBe("/remote/workspaces");
+    const binding = await readCodexAppServerBinding(sessionFile);
+    expect(binding?.threadId).toBe("thread-remote");
+    expect(binding?.cwd).toBe("/remote/workspaces");
+    expect(binding?.appServerRuntimeFingerprint).toEqual(expect.any(String));
   });
 
   it("starts a new bind thread when no model override is provided", async () => {
@@ -1182,6 +1225,7 @@ describe("codex conversation binding", () => {
 
   it("recreates a missing bound thread and preserves auth plus turn overrides", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
+    const boundCwd = path.join(tempDir, "bound-workspace");
     agentRuntimeMocks.ensureAuthProfileStore.mockReturnValue({
       version: 1,
       profiles: {
@@ -1194,7 +1238,7 @@ describe("codex conversation binding", () => {
     });
     await writeTestConversationBinding(sessionFile, {
       threadId: "thread-old",
-      cwd: tempDir,
+      cwd: boundCwd,
       authProfileId: "work",
       model: "gpt-5.4-mini",
       modelProvider: "openai",
@@ -1212,7 +1256,7 @@ describe("codex conversation binding", () => {
         }
         if (method === "thread/start") {
           return {
-            thread: { id: "thread-new", sessionId: "session-1", cwd: tempDir },
+            thread: { id: "thread-new", sessionId: "session-1", cwd: boundCwd },
             model: "gpt-5.4-mini",
           };
         }
@@ -1292,6 +1336,7 @@ describe("codex conversation binding", () => {
     expect(requests[1]?.params.approvalPolicy).toBe("on-request");
     expect(requests[1]?.params.sandbox).toBe("workspace-write");
     expect(requests[1]?.params.serviceTier).toBe("priority");
+    expect(requests[1]?.params.cwd).toBe(boundCwd);
     expect(requests[1]?.params).not.toHaveProperty("modelProvider");
     expect(requests[2]?.params.threadId).toBe("thread-new");
     expect(requests[2]?.params.approvalPolicy).toBe("on-request");
@@ -1937,6 +1982,129 @@ describe("codex conversation binding", () => {
     expect(turnStartParams[0]?.sandboxPolicy).toEqual({
       type: "dangerFullAccess",
     });
+  });
+
+  it("rotates a legacy bound thread into the configured remote environment", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    await writeTestConversationBinding(sessionFile, {
+      threadId: "thread-local",
+      cwd: tempDir,
+    });
+    const requests: Array<{ method: string; params: Record<string, unknown> }> = [];
+    let notificationHandler: ((notification: unknown) => void) | undefined;
+    let recoverRemoteThread = false;
+    let startedThreadId = "thread-remote";
+    sharedClientMocks.getSharedCodexAppServerClient.mockResolvedValue({
+      request: vi.fn(async (method: string, requestParams: Record<string, unknown>) => {
+        requests.push({ method, params: requestParams });
+        if (method === "thread/start") {
+          return conversationThreadStartResult(startedThreadId, "/remote/workspaces");
+        }
+        if (method === "turn/start") {
+          const threadId = String(requestParams.threadId);
+          if (recoverRemoteThread && threadId === "thread-remote") {
+            throw new Error(`thread not found: ${threadId}`);
+          }
+          setImmediate(() =>
+            notificationHandler?.({
+              method: "turn/completed",
+              params: {
+                threadId,
+                turn: {
+                  id: `turn-${threadId}`,
+                  status: "completed",
+                  items: [{ type: "agentMessage", id: "item-1", text: "remote done" }],
+                },
+              },
+            }),
+          );
+          return { turn: { id: `turn-${threadId}` } };
+        }
+        throw new Error(`unexpected method: ${method}`);
+      }),
+      getServerVersion: vi.fn(() => "0.142.5"),
+      getRuntimeIdentity: vi.fn(() => undefined),
+      addNotificationHandler: vi.fn((handler: (notification: unknown) => void) => {
+        notificationHandler = handler;
+        return () => undefined;
+      }),
+      addRequestHandler: vi.fn(() => () => undefined),
+    });
+
+    const result = await handleCodexConversationInboundClaim(
+      {
+        content: "continue remotely",
+        channel: "telegram",
+        isGroup: false,
+        commandAuthorized: true,
+      },
+      {
+        channelId: "telegram",
+        pluginBinding: {
+          bindingId: "binding-1",
+          pluginId: "codex",
+          pluginRoot: tempDir,
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "5185575566",
+          boundAt: Date.now(),
+          data: {
+            kind: "codex-app-server-session",
+            version: 1,
+            sessionFile,
+            workspaceDir: tempDir,
+          },
+        },
+      },
+      { pluginConfig: REMOTE_EXECUTION_PLUGIN_CONFIG, timeoutMs: 500 },
+    );
+
+    expect(result).toEqual({ handled: true, reply: { text: "remote done" } });
+    expect(requests.map((request) => request.method)).toEqual(["thread/start", "turn/start"]);
+    expect(requests[0]?.params.cwd).toBe("/remote/workspaces");
+    expect(requests[1]?.params.cwd).toBe("/remote/workspaces");
+    const binding = await readTestConversationBinding(sessionFile);
+    expect(binding?.threadId).toBe("thread-remote");
+    expect(binding?.cwd).toBe("/remote/workspaces");
+    expect(binding?.appServerRuntimeFingerprint).toEqual(expect.any(String));
+
+    recoverRemoteThread = true;
+    startedThreadId = "thread-recovered";
+    const recovered = await handleCodexConversationInboundClaim(
+      {
+        content: "recover remotely",
+        channel: "telegram",
+        isGroup: false,
+        commandAuthorized: true,
+      },
+      {
+        channelId: "telegram",
+        pluginBinding: {
+          bindingId: "binding-1",
+          pluginId: "codex",
+          pluginRoot: tempDir,
+          channel: "telegram",
+          accountId: "default",
+          conversationId: "5185575566",
+          boundAt: Date.now(),
+          data: {
+            kind: "codex-app-server-session",
+            version: 1,
+            sessionFile,
+            workspaceDir: tempDir,
+          },
+        },
+      },
+      { pluginConfig: REMOTE_EXECUTION_PLUGIN_CONFIG, timeoutMs: 500 },
+    );
+
+    expect(recovered).toEqual({ handled: true, reply: { text: "remote done" } });
+    expect(requests.slice(2).map((request) => request.method)).toEqual([
+      "turn/start",
+      "thread/start",
+      "turn/start",
+    ]);
+    expect(requests[3]?.params.cwd).toBe("/remote/workspaces");
   });
 
   it("keeps network-proxy bound app-server turns on their thread permissions profile", async () => {

@@ -424,6 +424,9 @@ export async function startOrResumeThread(params: {
         connectionClass: params.appServer.connectionClass,
         current: params.appServerRuntimeFingerprint,
         binding: binding.appServerRuntimeFingerprint,
+        // Remote execution changes a historically local runtime, so legacy
+        // bindings without a fingerprint must not resume against the new default environment.
+        requireCurrentFingerprint: Boolean(params.appServer.remoteExecutionFingerprint),
       })
     ) {
       embeddedAgentLog.debug("codex app-server runtime identity changed; starting a new thread", {
@@ -969,6 +972,7 @@ export function shouldRotateCodexAppServerBindingForRuntime(params: {
   connectionClass: CodexAppServerRuntimeOptions["connectionClass"];
   current?: string;
   binding?: string;
+  requireCurrentFingerprint?: boolean;
 }): boolean {
   if (!params.current) {
     return false;
@@ -976,7 +980,11 @@ export function shouldRotateCodexAppServerBindingForRuntime(params: {
   if (params.binding === params.current) {
     return false;
   }
-  return params.connectionClass === "remote" || Boolean(params.binding);
+  return (
+    params.requireCurrentFingerprint === true ||
+    params.connectionClass === "remote" ||
+    Boolean(params.binding)
+  );
 }
 
 function isTransientWebSearchRestriction(
@@ -1167,6 +1175,14 @@ export function buildThreadStartParams(
     agentDir: params.agentDir,
     config: params.config,
   });
+  const config = buildCodexRuntimeThreadConfigForRun(params, options.config, {
+    nativeCodeModeEnabled: options.nativeCodeModeEnabled,
+    nativeProviderWebSearchSupport: options.nativeProviderWebSearchSupport,
+    nativeCodeModeOnlyEnabled: options.nativeCodeModeOnlyEnabled,
+    webSearchAllowed: options.webSearchAllowed,
+    appServer: options.appServer,
+  });
+  assertCodexRemoteExecutionMcpCompatibility(options.appServer, config);
   return {
     model: modelSelection.model,
     ...(modelSelection.modelProvider ? { modelProvider: modelSelection.modelProvider } : {}),
@@ -1179,13 +1195,7 @@ export function buildThreadStartParams(
       : {}),
     personality: CODEX_NATIVE_PERSONALITY_NONE,
     serviceName: "OpenClaw",
-    config: buildCodexRuntimeThreadConfigForRun(params, options.config, {
-      nativeCodeModeEnabled: options.nativeCodeModeEnabled,
-      nativeProviderWebSearchSupport: options.nativeProviderWebSearchSupport,
-      nativeCodeModeOnlyEnabled: options.nativeCodeModeOnlyEnabled,
-      webSearchAllowed: options.webSearchAllowed,
-      appServer: options.appServer,
-    }),
+    config,
     ...resolveCodexThreadEnvironmentSelection(options),
     developerInstructions:
       options.developerInstructions ??
@@ -1249,6 +1259,14 @@ export function buildThreadResumeParams(
     agentDir: params.agentDir,
     config: params.config,
   });
+  const config = buildCodexRuntimeThreadConfigForRun(params, options.config, {
+    nativeCodeModeEnabled: options.nativeCodeModeEnabled,
+    nativeProviderWebSearchSupport: options.nativeProviderWebSearchSupport,
+    nativeCodeModeOnlyEnabled: options.nativeCodeModeOnlyEnabled,
+    webSearchAllowed: options.webSearchAllowed,
+    appServer: options.appServer,
+  });
+  assertCodexRemoteExecutionMcpCompatibility(options.appServer, config);
   return {
     threadId: options.threadId,
     model: modelSelection.model,
@@ -1260,18 +1278,29 @@ export function buildThreadResumeParams(
       ? { serviceTier: options.appServer.serviceTier }
       : {}),
     personality: CODEX_NATIVE_PERSONALITY_NONE,
-    config: buildCodexRuntimeThreadConfigForRun(params, options.config, {
-      nativeCodeModeEnabled: options.nativeCodeModeEnabled,
-      nativeProviderWebSearchSupport: options.nativeProviderWebSearchSupport,
-      nativeCodeModeOnlyEnabled: options.nativeCodeModeOnlyEnabled,
-      webSearchAllowed: options.webSearchAllowed,
-      appServer: options.appServer,
-    }),
+    config,
     developerInstructions:
       options.developerInstructions ??
       buildDeveloperInstructions(params, { dynamicTools: options.dynamicTools }),
     persistExtendedHistory: true,
   };
+}
+
+function assertCodexRemoteExecutionMcpCompatibility(
+  appServer: Pick<CodexAppServerRuntimeOptions, "remoteExecutionFingerprint">,
+  config: JsonObject,
+): void {
+  if (!appServer.remoteExecutionFingerprint) {
+    return;
+  }
+  const mcpServers = isUnknownRecord(config.mcp_servers) ? config.mcp_servers : undefined;
+  for (const [name, server] of Object.entries(mcpServers ?? {})) {
+    if (isUnknownRecord(server) && typeof server.command === "string") {
+      throw new Error(
+        `Codex remote execution cannot use stdio MCP server ${JSON.stringify(name)} because OpenClaw cannot place it in the remote environment`,
+      );
+    }
+  }
 }
 
 export function resolveCodexBindingModelProviderFallback(params: {
@@ -1538,6 +1567,8 @@ function resolveCodexThreadEnvironmentSelection(options: {
   if (options.environmentSelection) {
     return { environments: options.environmentSelection };
   }
+  // Omit the field so Codex can apply its configured default environment.
+  // An explicit [] would disable registry-backed remote execution.
   return {};
 }
 

@@ -65,6 +65,7 @@ import {
   readCodexNotificationThreadId,
   readCodexNotificationTurnId,
 } from "./notification-correlation.js";
+import { buildCodexAppServerRuntimeFingerprint } from "./plugin-app-cache-key.js";
 import {
   buildCodexPluginAppsConfigPatchFromPolicyContext,
   mergeCodexThreadConfigs,
@@ -103,6 +104,7 @@ import {
   resolveCodexAppServerModelProvider,
   resolveCodexBindingModelProviderFallback,
   resolveReasoningEffort,
+  shouldRotateCodexAppServerBindingForRuntime,
 } from "./thread-lifecycle.js";
 import { filterToolsForVisionInputs } from "./vision-tools.js";
 import {
@@ -317,6 +319,26 @@ export async function runCodexAppServerSideQuestion(
   let nativeHookRelay: NativeHookRelayRegistrationHandle | undefined;
 
   try {
+    if (appServer.remoteExecutionFingerprint || binding.appServerRuntimeFingerprint) {
+      const currentRuntimeFingerprint = buildCodexAppServerRuntimeFingerprint({
+        appServer,
+        appServerVersion: client.getServerVersion(),
+        runtimeIdentity: client.getRuntimeIdentity(),
+      });
+      if (
+        shouldRotateCodexAppServerBindingForRuntime({
+          connectionClass: appServer.connectionClass,
+          current: currentRuntimeFingerprint,
+          binding: binding.appServerRuntimeFingerprint,
+          // /btw must not fork a legacy local thread into a remote execution environment.
+          requireCurrentFingerprint: Boolean(appServer.remoteExecutionFingerprint),
+        })
+      ) {
+        throw new Error(
+          "Codex /btw needs a thread from the current execution environment. Send a normal message first to refresh the thread, then try /btw again.",
+        );
+      }
+    }
     const modelScopedAppServer = resolveCodexAppServerForModelProvider({
       appServer,
       provider: reviewerPolicyContext.modelProvider,

@@ -25,6 +25,8 @@ import {
   type CodexAppServerSandboxMode,
   type OpenClawExecPolicyForCodexAppServer,
 } from "./app-server/config.js";
+import { mapCodexAppServerRemoteWorkspacePath } from "./app-server/dynamic-tool-build.js";
+import { buildCodexAppServerRuntimeFingerprint } from "./app-server/plugin-app-cache-key.js";
 import { assertCodexThreadStartResponse } from "./app-server/protocol-validators.js";
 import type {
   CodexServiceTier,
@@ -377,6 +379,8 @@ type ConversationAppServerRuntime = Awaited<ReturnType<typeof resolveConversatio
 type CodexThreadBindingRuntime = ConversationAppServerRuntime & {
   agentLookup: ReturnType<typeof buildAgentLookup>;
   client: Awaited<ReturnType<typeof getLeasedSharedCodexAppServerClient>>;
+  executionCwd: string;
+  appServerRuntimeFingerprint?: string;
   model?: string;
   modelProvider?: string;
 };
@@ -439,14 +443,46 @@ async function resolveThreadBindingRuntime(
     authProfileId: params.authProfileId,
     ...agentLookup,
   });
+  const executionCwd = resolveConversationExecutionCwd(params.workspaceDir, modelScopedRuntime);
+  const appServerRuntimeFingerprint = buildConversationRemoteRuntimeFingerprint(
+    modelScopedRuntime,
+    client,
+  );
   return {
     execPolicy,
     runtime: modelScopedRuntime,
     agentLookup,
+    executionCwd,
+    ...(appServerRuntimeFingerprint ? { appServerRuntimeFingerprint } : {}),
     model: modelSelection?.model,
     modelProvider: modelSelection?.modelProvider ?? modelProvider,
     client,
   };
+}
+
+function resolveConversationExecutionCwd(
+  workspaceDir: string,
+  runtime: Pick<ConversationAppServerRuntime["runtime"], "remoteWorkspaceRoot">,
+): string {
+  return mapCodexAppServerRemoteWorkspacePath({
+    value: workspaceDir,
+    localWorkspaceRoot: workspaceDir,
+    remoteWorkspaceRoot: runtime.remoteWorkspaceRoot,
+  });
+}
+
+function buildConversationRemoteRuntimeFingerprint(
+  runtime: ConversationAppServerRuntime["runtime"],
+  client: Awaited<ReturnType<typeof getLeasedSharedCodexAppServerClient>>,
+): string | undefined {
+  if (!runtime.remoteExecutionFingerprint) {
+    return undefined;
+  }
+  return buildCodexAppServerRuntimeFingerprint({
+    appServer: runtime,
+    appServerVersion: client.getServerVersion(),
+    runtimeIdentity: client.getRuntimeIdentity(),
+  });
 }
 
 function buildThreadRequestRuntimeOptions(
@@ -496,7 +532,7 @@ async function requestNewConversationBindingThread(
   return await resolved.client.request(
     "thread/start",
     {
-      cwd: params.workspaceDir,
+      cwd: resolved.executionCwd,
       ...(resolved.model ? { model: resolved.model } : {}),
       ...(resolved.modelProvider ? { modelProvider: resolved.modelProvider } : {}),
       personality: CODEX_NATIVE_PERSONALITY_NONE,
@@ -522,7 +558,7 @@ async function writeThreadBindingFromResponse(
     kind: "set",
     binding: {
       threadId: response.thread.id,
-      cwd: response.thread.cwd ?? params.workspaceDir,
+      cwd: response.thread.cwd ?? resolved.executionCwd,
       authProfileId: params.authProfileId,
       model: response.model ?? resolved.model ?? params.model,
       modelProvider: normalizeCodexAppServerBindingModelProvider({
@@ -539,6 +575,7 @@ async function writeThreadBindingFromResponse(
       serviceTier: params.serviceTier ?? resolved.runtime.serviceTier ?? undefined,
       networkProxyProfileName: resolved.runtime.networkProxy?.profileName,
       networkProxyConfigFingerprint: resolved.runtime.networkProxy?.configFingerprint,
+      appServerRuntimeFingerprint: resolved.appServerRuntimeFingerprint,
     },
   });
   if (!committed) {
@@ -553,23 +590,23 @@ async function attachExistingThread(
 ): Promise<void> {
   const resolved = await resolveThreadBindingRuntime(params);
   try {
-    // Codex applies network-proxy permission profiles at thread/start. Resuming
-    // an arbitrary existing thread cannot prove that profile is active.
-    const response: CodexThreadResumeResponse | CodexThreadStartResponse = resolved.runtime
-      .networkProxy
-      ? await requestNewConversationBindingThread(params, resolved)
-      : await resolved.client.request(
-          CODEX_CONTROL_METHODS.resumeThread,
-          {
-            threadId: params.threadId,
-            ...(resolved.model ? { model: resolved.model } : {}),
-            ...(resolved.modelProvider ? { modelProvider: resolved.modelProvider } : {}),
-            personality: CODEX_NATIVE_PERSONALITY_NONE,
-            ...buildThreadRequestRuntimeOptions(params, resolved),
-            persistExtendedHistory: true,
-          },
-          { timeoutMs: resolved.runtime.requestTimeoutMs },
-        );
+    // Codex applies network profiles and execution environments at thread start.
+    // An arbitrary existing thread cannot prove either runtime identity.
+    const response: CodexThreadResumeResponse | CodexThreadStartResponse =
+      resolved.runtime.networkProxy || resolved.runtime.remoteExecutionFingerprint
+        ? await requestNewConversationBindingThread(params, resolved)
+        : await resolved.client.request(
+            CODEX_CONTROL_METHODS.resumeThread,
+            {
+              threadId: params.threadId,
+              ...(resolved.model ? { model: resolved.model } : {}),
+              ...(resolved.modelProvider ? { modelProvider: resolved.modelProvider } : {}),
+              personality: CODEX_NATIVE_PERSONALITY_NONE,
+              ...buildThreadRequestRuntimeOptions(params, resolved),
+              persistExtendedHistory: true,
+            },
+            { timeoutMs: resolved.runtime.requestTimeoutMs },
+          );
     await writeThreadBindingFromResponse(params, resolved, response);
   } finally {
     releaseLeasedSharedCodexAppServerClient(resolved.client);
@@ -603,7 +640,7 @@ async function runBoundTurn(params: {
     throw new Error("bound Codex conversation has no thread binding");
   }
   let threadId = binding.threadId;
-  const workspaceDir = binding.cwd || params.data.workspaceDir;
+  const localWorkspaceDir = params.data.workspaceDir;
   const reviewerModelProvider = resolveModelBackedReviewerPolicyProvider({
     authProfileId: binding.authProfileId,
     modelProvider: binding.modelProvider,
@@ -614,7 +651,7 @@ async function runBoundTurn(params: {
     config: params.config,
     agentId: params.data.agentId,
     sessionKey: params.sessionKey,
-    workspaceDir,
+    workspaceDir: localWorkspaceDir,
     modelProvider: reviewerModelProvider,
     model: binding.model,
     agentDir: params.data.agentDir,
@@ -673,15 +710,25 @@ async function runBoundTurn(params: {
     authProfileId: binding.authProfileId,
     ...agentLookup,
   });
+  const appServerRuntimeFingerprint = buildConversationRemoteRuntimeFingerprint(
+    modelScopedRuntime,
+    client,
+  );
+  const runtimeBindingChanged = modelScopedRuntime.remoteExecutionFingerprint
+    ? binding.appServerRuntimeFingerprint !== appServerRuntimeFingerprint
+    : Boolean(binding.appServerRuntimeFingerprint);
+  let executionCwd = runtimeBindingChanged
+    ? resolveConversationExecutionCwd(localWorkspaceDir, modelScopedRuntime)
+    : binding.cwd || resolveConversationExecutionCwd(localWorkspaceDir, modelScopedRuntime);
   let notificationCleanup: () => void = () => undefined;
   let requestCleanup: () => void = () => undefined;
   try {
-    if (networkProxyBindingChanged) {
+    if (networkProxyBindingChanged || runtimeBindingChanged) {
       const response = assertCodexThreadStartResponse(
         await client.request(
           "thread/start",
           {
-            cwd: workspaceDir,
+            cwd: executionCwd,
             ...(modelSelection?.model ? { model: modelSelection.model } : {}),
             ...(modelSelection?.modelProvider
               ? { modelProvider: modelSelection.modelProvider }
@@ -701,11 +748,12 @@ async function runBoundTurn(params: {
         ),
       );
       threadId = response.thread.id;
+      executionCwd = response.thread.cwd ?? executionCwd;
       const committed = await params.bindingStore.mutate(identity, {
         kind: "set",
         binding: {
           threadId,
-          cwd: response.thread.cwd ?? workspaceDir,
+          cwd: executionCwd,
           authProfileId: binding.authProfileId,
           model: response.model ?? modelSelection?.model ?? binding.model,
           modelProvider: normalizeCodexAppServerBindingModelProvider({
@@ -719,6 +767,7 @@ async function runBoundTurn(params: {
           serviceTier: serviceTier ?? undefined,
           networkProxyProfileName: modelScopedRuntime.networkProxy?.profileName,
           networkProxyConfigFingerprint: modelScopedRuntime.networkProxy?.configFingerprint,
+          appServerRuntimeFingerprint,
           conversationStartId: binding.conversationStartId,
           conversationSourceTransferComplete: binding.conversationSourceTransferComplete,
           historyCoveredThrough: binding.historyCoveredThrough,
@@ -775,12 +824,12 @@ async function runBoundTurn(params: {
           prompt: params.prompt,
           event: params.event,
         }),
-        cwd: workspaceDir,
+        cwd: executionCwd,
         approvalPolicy,
         approvalsReviewer: modelScopedRuntime.approvalsReviewer,
         ...(useStickyNetworkProfile
           ? {}
-          : { sandboxPolicy: codexSandboxPolicyForTurn(sandbox, workspaceDir) }),
+          : { sandboxPolicy: codexSandboxPolicyForTurn(sandbox, executionCwd) }),
         ...(modelSelection?.model ? { model: modelSelection.model } : {}),
         personality: CODEX_NATIVE_PERSONALITY_NONE,
         ...(serviceTier ? { serviceTier } : {}),
@@ -887,13 +936,16 @@ async function prepareConversationBinding(
       sessionKey: params.sessionKey,
     });
     const agentLookup = buildAgentLookup({ agentDir: params.data.agentDir, config: params.config });
+    // Remote bindings store an executor cwd. Recovery must start from the local
+    // workspace so thread creation can project it into the current environment.
+    const inheritedWorkspaceDir = inherited?.appServerRuntimeFingerprint
+      ? params.data.workspaceDir
+      : (inherited?.cwd ?? params.data.workspaceDir);
     const bindingParams: CodexThreadBindingParams = {
       bindingStore: params.bindingStore,
       identity,
       pluginConfig: params.pluginConfig,
-      workspaceDir: requested
-        ? params.data.workspaceDir
-        : (inherited?.cwd ?? params.data.workspaceDir),
+      workspaceDir: requested ? params.data.workspaceDir : inheritedWorkspaceDir,
       ...agentLookup,
       model: requested?.model ?? inherited?.model,
       modelProvider: requested?.modelProvider ?? inherited?.modelProvider,
@@ -906,7 +958,9 @@ async function prepareConversationBinding(
       agentId: params.data.agentId,
     };
     const threadId = requested?.threadId ?? (!current ? params.data.source?.threadId : undefined);
-    if (threadId && !options.forceNew) {
+    // A persisted remote cwd/thread cannot be proven valid after a topology change.
+    // Start clean; active remote execution already follows the same safe behavior.
+    if (threadId && !options.forceNew && !inherited?.appServerRuntimeFingerprint) {
       await attachExistingThread({ ...bindingParams, threadId });
     } else {
       await createThread(bindingParams);

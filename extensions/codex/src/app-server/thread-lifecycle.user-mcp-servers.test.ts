@@ -147,6 +147,36 @@ describe("startOrResumeThread — user mcp.servers projection (regression: #8081
     });
   });
 
+  it("rejects local stdio MCP servers in a remote execution environment", async () => {
+    const sessionFile = path.join(tempDir, "session.jsonl");
+    const workspaceDir = path.join(tempDir, "workspace");
+    const request = vi.fn();
+
+    await expect(
+      startOrResumeThread({
+        client: { request } as never,
+        params: createParams(sessionFile, workspaceDir, {
+          mcp: {
+            servers: {
+              outlook: {
+                transport: "stdio",
+                command: "node",
+                args: ["/opt/outlook-mcp/dist/index.js"],
+              },
+            },
+          },
+        } as unknown as EmbeddedRunAttemptParams["config"]),
+        cwd: workspaceDir,
+        dynamicTools: [],
+        appServer: {
+          ...createAppServerOptions(),
+          remoteExecutionFingerprint: "sha256:remote",
+        },
+      }),
+    ).rejects.toThrow('cannot use stdio MCP server "outlook"');
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it("projects only Codex user MCP servers scoped to the current agent", async () => {
     const sessionFile = path.join(tempDir, "session.jsonl");
     const workspaceDir = path.join(tempDir, "workspace");

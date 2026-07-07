@@ -402,6 +402,18 @@ describe("Codex app-server native code mode config", () => {
     expect(request.personality).toBe("none");
   });
 
+  it("preserves the app-server default execution environment", () => {
+    const request = buildThreadStartParams(createAttemptParams({ provider: "codex" }), {
+      cwd: "/remote/workspace",
+      dynamicTools: [],
+      appServer: createAppServerOptions() as never,
+      developerInstructions: "test instructions",
+      nativeCodeModeEnabled: true,
+    });
+
+    expect(request).not.toHaveProperty("environments");
+  });
+
   it("enables hosted Codex web search on thread/start by default", () => {
     const request = buildThreadStartParams(createAttemptParams({ provider: "codex" }), {
       cwd: "/repo",

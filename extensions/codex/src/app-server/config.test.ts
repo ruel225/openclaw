@@ -7,9 +7,11 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CODEX_APP_SERVER_CONFIG_KEYS,
   CODEX_APP_SERVER_EXPERIMENTAL_CONFIG_KEYS,
+  CODEX_APP_SERVER_REMOTE_EXECUTION_CONFIG_KEYS,
   CODEX_COMPUTER_USE_CONFIG_KEYS,
   CODEX_PLUGIN_ENTRY_CONFIG_KEYS,
   CODEX_PLUGINS_CONFIG_KEYS,
+  CODEX_REMOTE_EXECUTION_ENV_VARS,
   canUseCodexModelBackedApprovalsReviewerForModel,
   codexAppServerStartOptionsKey,
   fingerprintCodexAppServerNetworkProxyConfigPatch,
@@ -304,8 +306,26 @@ describe("Codex app-server config", () => {
     });
 
     expectFields(runtime.start, "runtime start", {
-      clearEnv: ["OPENAI_API_KEY"],
+      clearEnv: ["OPENAI_API_KEY", ...CODEX_REMOTE_EXECUTION_ENV_VARS],
     });
+  });
+
+  it("clears inherited exec-server routing unless validated remote execution is configured", () => {
+    const runtime = resolveRuntimeForTest({ env: {} });
+
+    expect(runtime.start.clearEnv).toEqual(CODEX_REMOTE_EXECUTION_ENV_VARS);
+  });
+
+  it("keeps canonical exec-server clears when configured entries use different casing", () => {
+    const runtime = resolveRuntimeForTest({
+      pluginConfig: { appServer: { clearEnv: ["codex_exec_server_url"] } },
+      env: {},
+    });
+
+    expect(runtime.start.clearEnv).toEqual([
+      "codex_exec_server_url",
+      ...CODEX_REMOTE_EXECUTION_ENV_VARS,
+    ]);
   });
 
   it("normalizes legacy service tiers without discarding the rest of the config", () => {
@@ -418,6 +438,252 @@ describe("Codex app-server config", () => {
       remoteAppsSubstrate: "preconfigured",
       remoteWorkspaceRoot: "/home/oai/openclaw-workspaces",
     });
+  });
+
+  it("keeps app-server local while configuring authenticated remote execution", () => {
+    const runtime = resolveRuntimeForTest({
+      pluginConfig: {
+        appServer: {
+          remoteWorkspaceRoot: " /home/codex/workspaces ",
+          experimental: {
+            remoteExecution: {
+              registryUrl: " https://environment-registry.example.com/api/// ",
+              environmentId: " devbox-example ",
+              authToken: " registry-token ",
+              chatgptAccountId: " account-example ",
+            },
+          },
+        },
+      },
+    });
+
+    expectFields(runtime, "runtime", {
+      connectionClass: "local-loopback",
+      remoteWorkspaceRoot: "/home/codex/workspaces",
+    });
+    expect(runtime.remoteExecutionFingerprint).toMatch(/^sha256:[a-f0-9]{64}$/u);
+    expect(runtime.remoteExecutionFingerprint).not.toContain("registry-token");
+    expect(runtime.start.env).toEqual({
+      CODEX_EXEC_SERVER_URL: "none",
+      CODEX_EXEC_SERVER_NOISE_REGISTRY_URL: "https://environment-registry.example.com/api",
+      CODEX_EXEC_SERVER_NOISE_ENVIRONMENT_ID: "devbox-example",
+      CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN: "registry-token",
+      CODEX_EXEC_SERVER_NOISE_CHATGPT_ACCOUNT_ID: "account-example",
+    });
+    // The explicit empty list must override CodexAppServerClient.start() defaults,
+    // which clear remote routing for ordinary local app-server launches.
+    expect(runtime.start.clearEnv).toEqual([]);
+  });
+
+  it("isolates remote execution in the shared-client key without exposing credentials", () => {
+    const resolve = (authToken: string, chatgptAccountId?: string) =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: {
+              remoteExecution: {
+                registryUrl: "https://environment-registry.example.com/api",
+                environmentId: "devbox-example",
+                authToken,
+                ...(chatgptAccountId ? { chatgptAccountId } : {}),
+              },
+            },
+          },
+        },
+      });
+    const first = resolve("registry-token-first");
+    const second = resolve("registry-token-second");
+    const otherAccount = resolve("registry-token-second", "account-other");
+    const firstKey = codexAppServerStartOptionsKey(first.start);
+    const secondKey = codexAppServerStartOptionsKey(second.start);
+
+    expect(firstKey).not.toEqual(secondKey);
+    expect(firstKey).not.toContain("registry-token-first");
+    expect(secondKey).not.toContain("registry-token-second");
+    expect(first.remoteExecutionFingerprint).toEqual(second.remoteExecutionFingerprint);
+    expect(otherAccount.remoteExecutionFingerprint).not.toEqual(second.remoteExecutionFingerprint);
+  });
+
+  it("fails closed for incomplete or unsafe remote execution topology", () => {
+    const remoteExecution = {
+      registryUrl: "https://environment-registry.example.com/api",
+      environmentId: "devbox-example",
+      authToken: "registry-token",
+    };
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            transport: "websocket",
+            url: "ws://127.0.0.1:39175",
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: { remoteExecution },
+          },
+        },
+      }),
+    ).toThrow("remoteExecution requires appServer.transport=stdio");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: { appServer: { experimental: { remoteExecution } } },
+      }),
+    ).toThrow("remoteExecution requires appServer.remoteWorkspaceRoot");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: {
+              remoteExecution: { ...remoteExecution, registryUrl: "http://registry.example.com" },
+            },
+          },
+        },
+      }),
+    ).toThrow("registryUrl must use HTTPS unless it targets loopback");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: {
+              remoteExecution: {
+                ...remoteExecution,
+                registryUrl: "https://user:password@environment-registry.example.com/api",
+              },
+            },
+          },
+        },
+      }),
+    ).toThrow("registryUrl cannot contain credentials");
+    for (const registryUrl of [
+      "https://environment-registry.example.com/api?tenant=test",
+      "https://environment-registry.example.com/api#tenant",
+    ]) {
+      expect(() =>
+        resolveRuntimeForTest({
+          pluginConfig: {
+            appServer: {
+              remoteWorkspaceRoot: "/home/codex/workspaces",
+              experimental: {
+                remoteExecution: { ...remoteExecution, registryUrl },
+              },
+            },
+          },
+        }),
+      ).toThrow("registryUrl cannot contain a query or fragment");
+    }
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: {
+              remoteExecution: {
+                ...remoteExecution,
+                registryUrl: "http://127.attacker.example",
+              },
+            },
+          },
+        },
+      }),
+    ).toThrow("registryUrl must use HTTPS unless it targets loopback");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            clearEnv: ["CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN"],
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: { remoteExecution },
+          },
+        },
+      }),
+    ).toThrow("clearEnv cannot clear CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            networkProxy: { enabled: true },
+            experimental: { remoteExecution },
+          },
+        },
+      }),
+    ).toThrow("remoteExecution cannot be combined with appServer.networkProxy");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: { remoteExecution, sandboxExecServer: true },
+          },
+        },
+      }),
+    ).toThrow("remoteExecution cannot be combined with appServer.experimental.sandboxExecServer");
+    expect(() =>
+      resolveRuntimeForTest({
+        openClawSandboxActive: true,
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: { remoteExecution },
+          },
+        },
+      }),
+    ).toThrow("remoteExecution cannot run inside an active OpenClaw sandbox");
+  });
+
+  it("rejects unresolved remote execution SecretRefs", () => {
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            remoteWorkspaceRoot: "/home/codex/workspaces",
+            experimental: {
+              remoteExecution: {
+                registryUrl: "https://environment-registry.example.com/api",
+                environmentId: "devbox-example",
+                authToken: envRef("CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN"),
+              },
+            },
+          },
+        },
+      }),
+    ).toThrow(
+      'appServer.experimental.remoteExecution.authToken: unresolved SecretRef "env:default:CODEX_EXEC_SERVER_NOISE_AUTH_TOKEN"',
+    );
+  });
+
+  it("rejects malformed remote execution config instead of falling back to local execution", () => {
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            experimental: {
+              remoteExecution: {
+                registryUrl: "https://environment-registry.example.com/api",
+                environmentId: "devbox-example",
+              },
+            },
+          },
+        } as never,
+      }),
+    ).toThrow("config is invalid while appServer.experimental.remoteExecution is configured");
+    expect(() =>
+      resolveRuntimeForTest({
+        pluginConfig: {
+          appServer: {
+            experimental: {
+              remoteExecution: {
+                registryUrl: "https://environment-registry.example.com/api",
+                environmentId: "devbox-example",
+                authToken: "registry-token",
+                unexpected: true,
+              },
+            },
+          },
+        } as never,
+      }),
+    ).toThrow("config is invalid while appServer.experimental.remoteExecution is configured");
   });
 
   it("passes resolved app-server SecretInput strings through to auth token and headers", () => {
@@ -1921,6 +2187,7 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
         args: ["app-server", "--listen", "stdio://"],
         headers: {},
         homeScope: "agent",
+        clearEnv: CODEX_REMOTE_EXECUTION_ENV_VARS,
       },
     });
   });
@@ -2628,6 +2895,21 @@ allowed_sandbox_modes = ["read-only", "workspace-write"]
     ]);
     for (const key of CODEX_APP_SERVER_EXPERIMENTAL_CONFIG_KEYS) {
       expectUiHintLabel(manifest, `appServer.experimental.${key}`);
+    }
+    const remoteExecutionSchema = appServerExperimentalProperties.remoteExecution as {
+      properties: Record<string, unknown>;
+      required: string[];
+    };
+    expect(Object.keys(remoteExecutionSchema.properties).toSorted()).toEqual([
+      ...CODEX_APP_SERVER_REMOTE_EXECUTION_CONFIG_KEYS,
+    ]);
+    expect(remoteExecutionSchema.required.toSorted()).toEqual([
+      "authToken",
+      "environmentId",
+      "registryUrl",
+    ]);
+    for (const key of CODEX_APP_SERVER_REMOTE_EXECUTION_CONFIG_KEYS) {
+      expectUiHintLabel(manifest, `appServer.experimental.remoteExecution.${key}`);
     }
     const computerUseManifestKeys = Object.keys(
       manifest.configSchema.properties.computerUse.properties,

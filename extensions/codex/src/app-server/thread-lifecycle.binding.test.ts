@@ -295,6 +295,13 @@ describe("Codex app-server thread lifecycle bindings", () => {
         current: "local-runtime-v1",
       }),
     ).toBe(false);
+    expect(
+      shouldRotateCodexAppServerBindingForRuntime({
+        connectionClass: "local-loopback",
+        current: "remote-execution-v1",
+        requireCurrentFingerprint: true,
+      }),
+    ).toBe(true);
   });
 
   it("does not write a binding when thread start resolves after abort", async () => {
