@@ -42,6 +42,12 @@ export type GeminiEmbeddingClient = {
 
 export const DEFAULT_GEMINI_EMBEDDING_MODEL = "gemini-embedding-001";
 const DEFAULT_GOOGLE_API_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
+// Google rejects an inline :batchEmbedContents call with more than 100 requests
+// ("at most 100 requests can be in one batch", 400 INVALID_ARGUMENT) even though
+// the reference docs omit the cap; an oversized memory batch aborts indexing
+// because the generic split-recovery path does not classify that error. The
+// provider owns this endpoint contract, so partition here before sending.
+const GEMINI_INLINE_EMBED_MAX_REQUESTS = 100;
 const GEMINI_MAX_INPUT_TOKENS: Record<string, number> = {
   "gemini-embedding-001": 2048,
   "gemini-embedding-2": 8192,
@@ -320,25 +326,36 @@ export async function createGeminiEmbeddingProvider(
     if (inputs.length === 0) {
       return [];
     }
-    const payload = await fetchGeminiEmbeddingPayload({
-      client,
-      endpoint: batchUrl,
-      body: {
-        requests: inputs.map((input) =>
-          buildGeminiEmbeddingRequest({
-            input,
-            model: client.model,
-            role: "document",
-            modelPath: client.modelPath,
-            taskType: options.taskType ?? "RETRIEVAL_DOCUMENT",
-            outputDimensionality,
-          }),
-        ),
-      },
-      signal: callOptions?.signal,
-    });
-    const embeddings = readGeminiBatchEmbeddings(payload, inputs.length);
-    return embeddings.map((values) => sanitizeGeminiEmbedding(values, outputDimensionality));
+    // Parallel partitions share one batch deadline; a serial loop would spend
+    // it across requests and starve large memory batches.
+    const partitions: EmbeddingInput[][] = [];
+    for (let start = 0; start < inputs.length; start += GEMINI_INLINE_EMBED_MAX_REQUESTS) {
+      partitions.push(inputs.slice(start, start + GEMINI_INLINE_EMBED_MAX_REQUESTS));
+    }
+    const partitionEmbeddings = await Promise.all(
+      partitions.map(async (partition) => {
+        const payload = await fetchGeminiEmbeddingPayload({
+          client,
+          endpoint: batchUrl,
+          body: {
+            requests: partition.map((input) =>
+              buildGeminiEmbeddingRequest({
+                input,
+                model: client.model,
+                role: "document",
+                modelPath: client.modelPath,
+                taskType: options.taskType ?? "RETRIEVAL_DOCUMENT",
+                outputDimensionality,
+              }),
+            ),
+          },
+          signal: callOptions?.signal,
+        });
+        const embeddings = readGeminiBatchEmbeddings(payload, partition.length);
+        return embeddings.map((values) => sanitizeGeminiEmbedding(values, outputDimensionality));
+      }),
+    );
+    return partitionEmbeddings.flat();
   };
 
   return {

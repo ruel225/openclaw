@@ -374,6 +374,48 @@ describe("Gemini embedding provider", () => {
     );
   });
 
+  it("partitions inline document batches at the 100-request endpoint cap, keeping input order", async () => {
+    const batchSizes: number[] = [];
+    installFetchMock((input, init) => {
+      const url = input instanceof URL ? input.href : typeof input === "string" ? input : input.url;
+      if (!url.endsWith(":batchEmbedContents")) {
+        return { embedding: { values: axisVector(128) } };
+      }
+      const body = JSON.parse(String(init?.body)) as {
+        requests: Array<{ content: { parts: Array<{ text: string }> } }>;
+      };
+      batchSizes.push(body.requests.length);
+      return {
+        embeddings: body.requests.map((request) => ({
+          values: [
+            Number(/doc-(\d+)/.exec(request.content.parts[0]?.text ?? "")?.[1] ?? -1),
+            ...axisVector(127, 1),
+          ],
+        })),
+      };
+    });
+
+    const { provider } = await createGeminiEmbeddingProvider({
+      config: {} as never,
+      provider: "gemini",
+      remote: { apiKey: "test-key" },
+      model: "gemini-embedding-001",
+      dimensions: 128,
+      fallback: "none",
+    });
+
+    const inputs = Array.from({ length: 101 }, (_, index) => `doc-${index}`);
+    const embeddings = await provider.embedBatch(inputs, { inputType: "document" });
+
+    expect(batchSizes).toEqual([100, 1]);
+    expect(embeddings).toHaveLength(101);
+    // Embeddings are L2-normalized on return; the first axis still orders the
+    // echoed document index, so monotonicity proves cross-partition ordering.
+    for (let index = 1; index < embeddings.length; index += 1) {
+      expect(embeddings[index][0]).toBeGreaterThan(embeddings[index - 1][0]);
+    }
+  });
+
   it("keeps the preview identifier compatible during migration", async () => {
     const fetchMock = installFetchMock(() => ({
       embedding: { values: axisVector(768) },
