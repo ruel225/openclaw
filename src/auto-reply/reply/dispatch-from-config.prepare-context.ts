@@ -431,7 +431,11 @@ export async function prepareDispatchOperationContext(state: PrepareDispatchDeli
   }
   const commitInboundDedupeIfClaimed = () => {
     if (inboundDedupeClaim.status === "claimed") {
-      commitInboundDedupe(inboundDedupeClaim.key);
+      // Tag the commit with the adoption lifecycle so a queue abandonment before
+      // admission can free the entry for the watchdog-released ingress retry.
+      commitInboundDedupe(inboundDedupeClaim.key, {
+        owner: params.replyOptions?.turnAdoptionLifecycle,
+      });
     }
   };
   const releaseInboundDedupeIfClaimed = () => {

@@ -29,6 +29,15 @@ const inboundDedupeInFlight = resolveGlobalSingleton(
   () => new Set<string>(),
 );
 
+type InboundDedupeOwnership = { key: string; ownerToken: object };
+
+/** Chunk-shared owner→committed-entry association so abandonment can free the entry. */
+const INBOUND_DEDUPE_OWNERSHIPS_KEY = Symbol.for("openclaw.inboundDedupeOwnerships");
+const inboundDedupeOwnerships = resolveGlobalSingleton(
+  INBOUND_DEDUPE_OWNERSHIPS_KEY,
+  () => new WeakMap<object, InboundDedupeOwnership>(),
+);
+
 type InboundDedupeClaimResult =
   | { status: "invalid" }
   | { status: "duplicate"; key: string }
@@ -101,10 +110,16 @@ export function claimInboundDedupe(
 
 export function commitInboundDedupe(
   key: string,
-  opts?: { cache?: DedupeCache; now?: number; inFlight?: Set<string> },
+  opts?: { cache?: DedupeCache; now?: number; inFlight?: Set<string>; owner?: object },
 ): void {
   const cache = opts?.cache ?? inboundDedupeCache;
-  cache.check(key, opts?.now);
+  // An owner-tagged commit stays releasable by exactly that owner, so a run the
+  // queue relinquishes before admission can free its entry for the retry.
+  const ownerToken = opts?.owner ? {} : undefined;
+  cache.check(key, opts?.now, ownerToken);
+  if (opts?.owner && ownerToken) {
+    inboundDedupeOwnerships.set(opts.owner, { key, ownerToken });
+  }
   const inFlight = opts?.inFlight ?? inboundDedupeInFlight;
   inFlight.delete(key);
 }
@@ -112,6 +127,22 @@ export function commitInboundDedupe(
 export function releaseInboundDedupe(key: string, opts?: { inFlight?: Set<string> }): void {
   const inFlight = opts?.inFlight ?? inboundDedupeInFlight;
   inFlight.delete(key);
+}
+
+/**
+ * Frees the committed entry an abandoned pre-admission run owns. The durable
+ * ingress retry the abandonment triggers must be re-admittable instead of being
+ * rejected as a duplicate of the very dispatch the queue just released. The key
+ * may have expired and been re-committed by a newer dispatch; only the owner
+ * that recorded the current entry may release it.
+ */
+export function releaseCommittedInboundDedupe(owner: object, opts?: { cache?: DedupeCache }): void {
+  const ownership = inboundDedupeOwnerships.get(owner);
+  if (!ownership) {
+    return;
+  }
+  inboundDedupeOwnerships.delete(owner);
+  (opts?.cache ?? inboundDedupeCache).delete(ownership.key, ownership.ownerToken);
 }
 
 export function resetInboundDedupe(): void {

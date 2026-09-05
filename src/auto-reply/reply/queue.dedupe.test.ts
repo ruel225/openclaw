@@ -2,6 +2,8 @@
 import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createDeferred } from "../../../test/helpers/promise.js";
+import type { MsgContext } from "../templating.js";
+import { claimInboundDedupe, commitInboundDedupe, resetInboundDedupe } from "./inbound-dedupe.js";
 import type { FollowupRun, QueueSettings } from "./queue.js";
 import {
   admitFollowupRunLifecycle,
@@ -48,6 +50,7 @@ function createFollowupCollector(expectedCalls = 1): {
 describe("followup queue deduplication", () => {
   beforeEach(() => {
     resetRecentQueuedMessageIdDedupe();
+    resetInboundDedupe();
   });
 
   it("deduplicates messages with same Discord message_id", async () => {
@@ -588,6 +591,48 @@ describe("followup queue deduplication", () => {
       originatingTo: "group:G1",
     });
     expect(enqueueFollowupRun(key, redelivery, collectSettings)).toBe(false);
+  });
+
+  it("readmits a watchdog-released retry after freeing the committed inbound dedupe entry", async () => {
+    const key = `test-dedup-inbound-release-${Date.now()}`;
+    const ctx: MsgContext = {
+      Provider: "whatsapp",
+      Surface: "whatsapp",
+      From: "whatsapp:+15550100",
+      To: "whatsapp:+15550200",
+      OriginatingChannel: "whatsapp",
+      OriginatingTo: "whatsapp:+15550200",
+      SessionKey: "agent:main:whatsapp:+15550200",
+      MessageSid: "stalled-1",
+    };
+    const onAbandoned = vi.fn();
+
+    // Dispatch semantics: the queued message committed its inbound dedupe entry
+    // tagged with the adoption lifecycle it was enqueued under.
+    const claim = claimInboundDedupe(ctx);
+    expect(claim.status).toBe("claimed");
+    if (claim.status !== "claimed") {
+      throw new Error("expected the first dispatch to claim inbound dedupe");
+    }
+    const run = createRun({
+      prompt: "stalled message",
+      messageId: "stalled-1",
+      originatingChannel: "whatsapp",
+      originatingTo: "whatsapp:+15550200",
+    });
+    run.turnAdoptionLifecycle = { onAdopted: () => {}, onAbandoned };
+    commitInboundDedupe(claim.key, { owner: run.turnAdoptionLifecycle });
+    expect(enqueueFollowupRun(key, run, collectSettings)).toBe(true);
+
+    // The watchdog relinquishes the run before admission and the durable claim
+    // is released for retry.
+    completeFollowupRunLifecycle(run);
+    expect(onAbandoned).toHaveBeenCalledOnce();
+    clearSessionQueues([key]);
+
+    // The redelivered message must be re-admittable instead of being recorded
+    // as skipped:duplicate, which would destroy it as a false "completed".
+    expect(claimInboundDedupe(ctx).status).toBe("claimed");
   });
 
   it("can opt-in to prompt-based dedupe when message id is absent", () => {

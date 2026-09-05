@@ -2,7 +2,12 @@
 import { importFreshModule } from "openclaw/plugin-sdk/test-fixtures";
 import { afterEach, describe, expect, it } from "vitest";
 import type { MsgContext } from "../templating.js";
-import { claimInboundDedupe, commitInboundDedupe, resetInboundDedupe } from "./inbound-dedupe.js";
+import {
+  claimInboundDedupe,
+  commitInboundDedupe,
+  releaseCommittedInboundDedupe,
+  resetInboundDedupe,
+} from "./inbound-dedupe.js";
 
 const sharedInboundContext: MsgContext = {
   Provider: "discord",
@@ -127,5 +132,28 @@ describe("inbound dedupe", () => {
       inboundA.resetInboundDedupe();
       inboundB.resetInboundDedupe();
     }
+  });
+
+  it("frees a committed entry for its owner and never for a stale owner after recommit", () => {
+    const owner = {};
+    const firstKey = claimKey(sharedInboundContext);
+    commitInboundDedupe(firstKey, { owner });
+    releaseCommittedInboundDedupe(owner);
+    expect(claimInboundDedupe(sharedInboundContext).status).toBe("claimed");
+
+    // The key expired and a newer dispatch re-committed under a different
+    // owner; the abandoned owner must not free the replacement entry.
+    resetInboundDedupe();
+    const staleOwner = {};
+    const staleKey = claimKey(sharedInboundContext);
+    commitInboundDedupe(staleKey, { owner: staleOwner });
+    resetInboundDedupe();
+    const currentOwner = {};
+    const currentKey = claimKey(sharedInboundContext);
+    commitInboundDedupe(currentKey, { owner: currentOwner });
+    releaseCommittedInboundDedupe(staleOwner);
+    expect(claimInboundDedupe(sharedInboundContext).status).toBe("duplicate");
+    releaseCommittedInboundDedupe(currentOwner);
+    expect(claimInboundDedupe(sharedInboundContext).status).toBe("claimed");
   });
 });
