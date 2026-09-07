@@ -1,235 +1,17 @@
 import fs from "node:fs/promises";
 import { createDeferred } from "openclaw/plugin-sdk/extension-shared";
-import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { describe, expect, it, vi } from "vitest";
 import { runBoundedCodexAppServerTurn } from "./bounded-turn.js";
 import {
-  createFakeCodexAppServerClient,
-  threadStartResult as createThreadStartResult,
-  turnStartResult,
-} from "./codex-app-server.test-fixtures.js";
+  codexModel,
+  completedTurnResult,
+  createClientFactory,
+  inProgressTurnResult,
+  threadStartResult,
+} from "./bounded-turn.test-helpers.js";
 import type { JsonValue } from "./protocol.js";
 import type { CodexAppServerClientFactory } from "./shared-client.js";
 import { createClientHarness } from "./test-support.js";
-
-function codexModel(model = "gpt-5.4", id = model) {
-  return {
-    id,
-    model,
-    upgrade: null,
-    upgradeInfo: null,
-    availabilityNux: null,
-    displayName: id,
-    description: "test model",
-    hidden: false,
-    isDefault: true,
-    inputModalities: ["text"],
-    supportedReasoningEfforts: [{ reasoningEffort: "low", description: "fast" }],
-    defaultReasoningEffort: "low",
-    supportsPersonality: false,
-    multiAgentVersion: null,
-    additionalSpeedTiers: [],
-    serviceTiers: [],
-    defaultServiceTier: null,
-  };
-}
-
-function threadStartResult(model: string, modelProvider = "openai") {
-  const result = createThreadStartResult("thread-finalizer", "/tmp/finalizer");
-  return {
-    ...result,
-    thread: { ...result.thread, sessionId: "session-finalizer", ephemeral: true, modelProvider },
-    model,
-    modelProvider,
-    approvalPolicy: "on-request",
-    sandbox: { type: "readOnly", networkAccess: false },
-  };
-}
-
-function completedTurnResult() {
-  return {
-    turn: {
-      ...turnStartResult("turn-finalizer", "completed").turn,
-      items: [{ id: "answer", type: "agentMessage", text: "The message was sent successfully." }],
-      startedAt: 1,
-      completedAt: 2,
-      durationMs: 1,
-    },
-  };
-}
-
-function inProgressTurnResult() {
-  return { turn: { ...turnStartResult("turn-finalizer").turn, startedAt: 1 } };
-}
-
-function createClientFactory(
-  options: {
-    mcpServers?: unknown[];
-    errorBeforeCompletion?: { message: string; willRetry: boolean };
-    terminalStatus?: "completed" | "interrupted";
-    assistantDelta?: string;
-    emptyAnswer?: boolean;
-    completeTurn?: boolean;
-    models?: ReturnType<typeof codexModel>[];
-    beforeRequest?: (method: string) => Promise<void>;
-    modelProvider?: string;
-    responseCompletions?: Array<{ responseId: string; usage: JsonValue }>;
-    preBindDeltaCount?: number;
-  } = {},
-) {
-  const methods: string[] = [];
-  const fixture = createFakeCodexAppServerClient(async (method: string, params?: unknown) => {
-    methods.push(method);
-    if (options.beforeRequest) {
-      await options.beforeRequest(method);
-    }
-    if (method === "model/list") {
-      const includeHidden = isRecord(params) && params.includeHidden === true;
-      return {
-        data: (options.models ?? [codexModel()]).filter((model) => includeHidden || !model.hidden),
-        nextCursor: null,
-      };
-    }
-    if (method === "config/read") {
-      return {
-        config: { mcp_servers: { inherited: { command: "unsafe" } } },
-        layers: [{ name: { type: "user" } }],
-      };
-    }
-    if (method === "configRequirements/read") {
-      return { requirements: null };
-    }
-    if (method === "thread/start" && isRecord(params) && typeof params.model === "string") {
-      return threadStartResult(params.model, options.modelProvider);
-    }
-    if (method === "mcpServerStatus/list") {
-      return {
-        data: options.mcpServers ?? [
-          {
-            name: "inherited",
-            serverInfo: null,
-            tools: {},
-            resources: [],
-            resourceTemplates: [],
-            authStatus: "unsupported",
-          },
-        ],
-        nextCursor: null,
-      };
-    }
-    if (method === "thread/inject_items") {
-      return {};
-    }
-    if (method === "turn/interrupt") {
-      queueMicrotask(() => {
-        for (const handler of fixture.notifications) {
-          void handler({
-            method: "turn/completed",
-            params: {
-              threadId: "thread-finalizer",
-              turn: { ...inProgressTurnResult().turn, status: "interrupted" },
-            },
-          });
-        }
-      });
-      return {};
-    }
-    if (method === "turn/start") {
-      if (options.completeTurn === false) {
-        return inProgressTurnResult();
-      }
-      queueMicrotask(() => {
-        for (const handler of fixture.notifications) {
-          for (let index = 0; index < (options.preBindDeltaCount ?? 0); index += 1) {
-            void handler({
-              method: "item/agentMessage/delta",
-              params: {
-                threadId: "thread-finalizer",
-                turnId: "turn-finalizer",
-                itemId: "answer",
-                delta: ".",
-              },
-            });
-          }
-          if (options.errorBeforeCompletion) {
-            void handler({
-              method: "error",
-              params: {
-                threadId: "thread-finalizer",
-                turnId: "turn-finalizer",
-                error: { message: options.errorBeforeCompletion.message },
-                willRetry: options.errorBeforeCompletion.willRetry,
-              },
-            });
-          }
-          if (options.assistantDelta) {
-            void handler({
-              method: "item/agentMessage/delta",
-              params: {
-                threadId: "thread-finalizer",
-                turnId: "turn-finalizer",
-                itemId: "answer",
-                delta: options.assistantDelta,
-              },
-            });
-          }
-          for (const response of options.responseCompletions ?? [
-            {
-              responseId: "response-finalizer",
-              usage: {
-                totalTokens: 12,
-                inputTokens: 8,
-                cachedInputTokens: 2,
-                cacheWriteInputTokens: 1,
-                outputTokens: 4,
-                reasoningOutputTokens: 3,
-              },
-            },
-          ]) {
-            void handler({
-              method: "rawResponse/completed",
-              params: {
-                threadId: "thread-finalizer",
-                turnId: "turn-finalizer",
-                ...response,
-              },
-            });
-          }
-          void handler({
-            method: "turn/completed",
-            params: {
-              threadId: "thread-finalizer",
-              turnId: "turn-finalizer",
-              turn: {
-                ...completedTurnResult().turn,
-                status: options.terminalStatus ?? "completed",
-                ...(options.terminalStatus === "interrupted" || options.emptyAnswer
-                  ? { items: [] }
-                  : {}),
-              },
-            },
-          });
-        }
-      });
-      return inProgressTurnResult();
-    }
-    throw new Error(`unexpected request: ${method}`);
-  });
-  const request = fixture.request;
-  const client = Object.assign(fixture.client, { close: vi.fn() });
-  const factory = vi.fn(async () => client) as unknown as CodexAppServerClientFactory;
-  return {
-    factory,
-    methods,
-    request,
-    notifications: fixture.notifications,
-    requests: fixture.requests,
-    handleServerRequest: (serverRequest: Parameters<typeof fixture.handleServerRequest>[0]) =>
-      fixture.handleServerRequest(serverRequest),
-    notify: (notification: Parameters<typeof fixture.notify>[0]) => fixture.notify(notification),
-    close: fixture.close,
-  };
-}
 
 describe("runBoundedCodexAppServerTurn settled finalization isolation", () => {
   it.each(["bound notification", "queued notification", "terminal response"] as const)(
@@ -529,6 +311,86 @@ describe("runBoundedCodexAppServerTurn settled finalization isolation", () => {
       name: "TimeoutError",
       message: "codex app-server hosted search turn timed out after 100ms",
     });
+  });
+
+  it("keeps its configured budget across a forward wall-clock correction during startup", async () => {
+    const fake = createClientFactory({ completeTurn: false });
+    const baseMs = Date.now();
+    let correctionMs = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => baseMs + correctionMs);
+    const factory: CodexAppServerClientFactory = async (options) => {
+      correctionMs = 60_000;
+      return await fake.factory(options);
+    };
+    try {
+      const startedAt = performance.now();
+      await expect(
+        runBoundedCodexAppServerTurn({
+          model: { mode: "required", id: "gpt-5.4" },
+          timeoutMs: 1_000,
+          options: { clientFactory: factory },
+          taskLabel: "hosted search",
+          developerInstructions: "Search only.",
+          input: [{ type: "text", text: "Find current market news.", text_elements: [] }],
+          requiredModalities: ["text"],
+          isolation: "private-stdio",
+        }),
+      ).rejects.toMatchObject({
+        name: "TimeoutError",
+        message: "codex app-server hosted search turn timed out after 1s",
+      });
+      // The correction happened during startup, so the full bound must still
+      // elapse before the turn reports its own timeout.
+      expect(performance.now() - startedAt).toBeGreaterThanOrEqual(900);
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("keeps a pending turn bounded across a backward wall-clock correction during startup", async () => {
+    const fake = createClientFactory({ completeTurn: false });
+    const baseMs = Date.now();
+    let correctionMs = 0;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => baseMs + correctionMs);
+    const factory: CodexAppServerClientFactory = async (options) => {
+      correctionMs = -60_000;
+      return await fake.factory(options);
+    };
+    let budgetGuard: NodeJS.Timeout | undefined;
+    try {
+      const run = runBoundedCodexAppServerTurn({
+        model: { mode: "required", id: "gpt-5.4" },
+        timeoutMs: 1_000,
+        options: { clientFactory: factory },
+        taskLabel: "hosted search",
+        developerInstructions: "Search only.",
+        input: [{ type: "text", text: "Find current market news.", text_elements: [] }],
+        requiredModalities: ["text"],
+        isolation: "private-stdio",
+      });
+      await expect(
+        Promise.race([
+          run.then(
+            () => "completed" as const,
+            (error: unknown) => {
+              if ((error as { name?: string }).name !== "TimeoutError") {
+                throw error;
+              }
+              return "timed out" as const;
+            },
+          ),
+          new Promise<never>((_, reject) => {
+            budgetGuard = setTimeout(
+              () => reject(new Error("turn outlived its configured bound")),
+              4_000,
+            );
+          }),
+        ]),
+      ).resolves.toBe("timed out");
+    } finally {
+      clearTimeout(budgetGuard);
+      dateNow.mockRestore();
+    }
   });
 
   it("keeps a caller abort distinct from its own timeout", async () => {
