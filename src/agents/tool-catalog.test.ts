@@ -3,7 +3,12 @@
  * Verifies built-in profile allowlists include expected core tool groups.
  */
 import { describe, expect, it } from "vitest";
-import { listCoreToolSections, resolveCoreToolProfilePolicy } from "./tool-catalog.js";
+import {
+  isKnownCoreToolId,
+  listCoreToolSections,
+  resolveCoreToolProfilePolicy,
+  resolveCoreToolProfiles,
+} from "./tool-catalog.js";
 
 function requireCoreToolProfilePolicy(profile: Parameters<typeof resolveCoreToolProfilePolicy>[0]) {
   const policy = resolveCoreToolProfilePolicy(profile);
@@ -122,5 +127,15 @@ describe("tool-catalog", () => {
   it("full profile uses wildcard to grant all tools (#76507)", () => {
     const policy = requireCoreToolProfilePolicy("full");
     expect(policy.allow).toEqual(["*"]);
+  });
+
+  it("lists the capability-gated pdf tool in the media section without a profile default", () => {
+    expect(isKnownCoreToolId("pdf")).toBe(true);
+    const media = listCoreToolSections().find((section) => section.id === "media");
+    if (!media) {
+      throw new Error("expected media section");
+    }
+    expect(media.tools.map((tool) => tool.id)).toContain("pdf");
+    expect(resolveCoreToolProfiles("pdf")).toEqual([]);
   });
 });

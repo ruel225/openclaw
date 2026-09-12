@@ -218,6 +218,16 @@ describe("tool-policy-pipeline", () => {
     ]);
   });
 
+  test("classifies an explicit pdf allowlist entry as unavailable core, not plugin-only", () => {
+    const warnings = runAllowlistWarningStep({
+      allow: ["pdf"],
+      label: "tools.allow",
+    });
+    expect(warnings).toEqual([
+      "tools: tools.allow allowlist contains unknown entries (pdf). These entries are shipped core tools but unavailable in the current runtime/provider/model/config.",
+    ]);
+  });
+
   test("includes the active reason for unavailable core tool warnings", () => {
     const warnings = runAllowlistWarningStep({
       allow: ["apply_patch", "reason_case_unknown"],
