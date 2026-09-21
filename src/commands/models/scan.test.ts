@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   loadModelsConfig: vi.fn(),
   resolveApiKeyForProviderCore: vi.fn(),
   scanOpenRouterModels: vi.fn(),
+  updateConfig: vi.fn(),
 }));
 
 vi.mock("./load-config.js", () => ({
@@ -20,6 +21,11 @@ vi.mock("../../agents/model-auth.js", () => ({
 
 vi.mock("../../agents/model-scan.js", () => ({
   scanOpenRouterModels: mocks.scanOpenRouterModels,
+}));
+
+vi.mock("./shared.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./shared.js")>()),
+  updateConfig: mocks.updateConfig,
 }));
 
 const { modelsScanCommand } = await import("./scan.js");
@@ -227,6 +233,80 @@ describe("models scan command", () => {
       );
 
       expect(mocks.scanOpenRouterModels).not.toHaveBeenCalled();
+    });
+  });
+
+  it("reports the selection as JSON without applying it to config", async () => {
+    await withOpenRouterApiKey("sk-or-test", async () => {
+      const runtime = createRuntime();
+      mocks.scanOpenRouterModels.mockResolvedValue([
+        scanResult({ tool: { ok: true, latencyMs: 5, skipped: false } }),
+      ]);
+
+      await modelsScanCommand({ json: true }, runtime);
+
+      expect(mocks.updateConfig).not.toHaveBeenCalled();
+      const payload = JSON.parse(runtime.lines[0] ?? "") as { selected: string[] };
+      expect(payload.selected).toEqual(["openrouter/acme/free:free"]);
+    });
+  });
+
+  it("applies the selection to fallbacks while keeping an existing primary without --set-default", async () => {
+    await withOpenRouterApiKey("sk-or-test", async () => {
+      const runtime = createRuntime();
+      mocks.scanOpenRouterModels.mockResolvedValue([
+        scanResult({ tool: { ok: true, latencyMs: 5, skipped: false } }),
+      ]);
+      mocks.updateConfig.mockImplementation(async (mutator: (cfg: unknown) => unknown) =>
+        mutator({
+          agents: {
+            defaults: {
+              model: {
+                primary: "openrouter/kept/primary",
+                fallbacks: ["openrouter/hand/tuned"],
+              },
+            },
+          },
+        }),
+      );
+
+      await modelsScanCommand({ yes: true }, runtime);
+
+      expect(mocks.updateConfig).toHaveBeenCalledTimes(1);
+      const written = (await mocks.updateConfig.mock.results[0]?.value) as {
+        agents?: { defaults?: { model?: { primary?: string; fallbacks?: string[] } } };
+      };
+      expect(written.agents?.defaults?.model?.fallbacks).toEqual(["openrouter/acme/free:free"]);
+      expect(written.agents?.defaults?.model?.primary).toBe("openrouter/kept/primary");
+    });
+  });
+
+  it("sets primary from the first selection only with --set-default", async () => {
+    await withOpenRouterApiKey("sk-or-test", async () => {
+      const runtime = createRuntime();
+      mocks.scanOpenRouterModels.mockResolvedValue([
+        scanResult({ tool: { ok: true, latencyMs: 5, skipped: false } }),
+      ]);
+      mocks.updateConfig.mockImplementation(async (mutator: (cfg: unknown) => unknown) =>
+        mutator({
+          agents: {
+            defaults: {
+              model: {
+                primary: "openrouter/kept/primary",
+                fallbacks: ["openrouter/hand/tuned"],
+              },
+            },
+          },
+        }),
+      );
+
+      await modelsScanCommand({ yes: true, setDefault: true }, runtime);
+
+      const written = (await mocks.updateConfig.mock.results[0]?.value) as {
+        agents?: { defaults?: { model?: { primary?: string; fallbacks?: string[] } } };
+      };
+      expect(written.agents?.defaults?.model?.primary).toBe("openrouter/acme/free:free");
+      expect(written.agents?.defaults?.model?.fallbacks).toEqual(["openrouter/acme/free:free"]);
     });
   });
 });

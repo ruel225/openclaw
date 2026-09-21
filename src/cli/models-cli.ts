@@ -284,7 +284,9 @@ export function registerModelsCli(program: Command) {
 
   models
     .command("scan")
-    .description("Scan OpenRouter free models for tools + images")
+    .description(
+      "Scan OpenRouter free models for tools + images and apply the selection to fallbacks",
+    )
     .option("--min-params <b>", "Minimum parameter size (billions)")
     .option("--max-age-days <days>", "Skip models older than N days")
     .option("--provider <name>", "Filter by provider prefix")
@@ -292,11 +294,15 @@ export function registerModelsCli(program: Command) {
     .option("--timeout <ms>", "Per-probe timeout in ms")
     .option("--concurrency <n>", "Probe concurrency")
     .option("--no-probe", "Skip live probes; list free candidates only")
-    .option("--yes", "Accept defaults without prompting", false)
+    .option("--yes", "Apply the default selection without prompting (replaces fallbacks)", false)
     .option("--no-input", "Disable prompts (use defaults)")
-    .option("--set-default", "Set agents.defaults.model to the first selection", false)
+    .option(
+      "--set-default",
+      "Also set agents.defaults.model.primary to the first selection (the selection always replaces fallbacks)",
+      false,
+    )
     .option("--set-image", "Set agents.defaults.imageModel to the first image selection", false)
-    .option("--json", "Output JSON", false)
+    .option("--json", "Output JSON without applying the selection to config", false)
     .action(async (opts, command: Command) => {
       const runtime = await loadModelsRuntime();
       runtime.rejectAgentScopedModelCommand(command, "scan");

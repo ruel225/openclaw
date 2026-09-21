@@ -183,7 +183,7 @@ function parsePositiveIntegerOption(raw: unknown, label: string, fallback: numbe
   return parsed;
 }
 
-/** Scans OpenRouter candidates, optionally probes them, then writes fallback defaults. */
+/** Scans OpenRouter candidates, optionally probes them, then applies the selection as fallback defaults; --json reports the selection without writing. */
 export async function modelsScanCommand(
   opts: {
     minParams?: string;
@@ -352,6 +352,18 @@ export async function modelsScanCommand(
     throw new Error("No image-capable models selected for image model.");
   }
 
+  if (opts.json) {
+    writeRuntimeJson(runtime, {
+      selected,
+      selectedImages,
+      setDefault: Boolean(opts.setDefault),
+      setImage: Boolean(opts.setImage),
+      results: sorted,
+      warnings: [],
+    });
+    return;
+  }
+
   await updateConfig((cfg) => {
     const nextModels = { ...cfg.agents?.defaults?.models };
     for (const entry of selected) {
@@ -392,18 +404,6 @@ export async function modelsScanCommand(
       },
     };
   });
-
-  if (opts.json) {
-    writeRuntimeJson(runtime, {
-      selected,
-      selectedImages,
-      setDefault: Boolean(opts.setDefault),
-      setImage: Boolean(opts.setImage),
-      results: sorted,
-      warnings: [],
-    });
-    return;
-  }
 
   logConfigUpdated(runtime);
   runtime.log(`Fallbacks: ${selected.join(", ")}`);
