@@ -524,7 +524,6 @@ export function handleMessageUpdate(
       !snapshot &&
       !reprojectBlockReply &&
       !replace &&
-      !ctx.params.enforceFinalTag &&
       (priorBlockIndex === streamContentIndex ||
         (priorBlockIndex === undefined && !priorBlockText)) &&
       projection?.projector.matchesTrimmedSource &&
@@ -533,6 +532,10 @@ export function handleMessageUpdate(
     if (plainAppend) {
       ctx.blockChunker.append(chunk);
     } else {
+      // Tagged streams strip <final> tags and hidden prefixes through
+      // stripBlockTags before the append-only checks above, so unchanged
+      // deltas can take the same fast path; replaced, tag-bearing, or
+      // multi-part frames still reconcile through full snapshots.
       const previousBlock = extractAssistantStreamSnapshot(ctx, partialAssistant, {
         throughIndex: streamItemChanged ? blockSourceIndex : priorSourceIndex,
         observedText: streamItemChanged ? "" : priorBlockText,
